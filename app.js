@@ -270,13 +270,13 @@ function makeCard(d, today) {
 
   editor.addEventListener('focus', function() {
     activeEditor = this; isEditing = true; card.classList.add('active');
-    showToolbar(); updateToolbarState();
+    showToolbar('main'); updateToolbarState();
   });
   editor.addEventListener('blur', function() {
     setTimeout(() => {
       if (!toolbar.contains(document.activeElement) && document.activeElement !== this) {
         card.classList.remove('active');
-        if (activeEditor === this) { activeEditor = null; isEditing = false; hideToolbar(); }
+        if (activeEditor === this) { activeEditor = null; isEditing = false; hideToolbar('main'); }
       }
     }, 150);
   });
@@ -317,16 +317,28 @@ async function syncNotes(content) {
 const toolbar = document.getElementById('toolbar');
 const bottomNav = document.getElementById('bottom-nav');
 function positionToolbar() {
-  if (!toolbar.classList.contains('show')) return;
+  const tbDv = document.getElementById('toolbar-dv');
+  const active = (tbDv && tbDv.classList.contains('show')) ? tbDv : toolbar.classList.contains('show') ? toolbar : null;
+  if (!active) return;
   if (window.visualViewport) {
     const vv = window.visualViewport;
-    toolbar.classList.add('floating');
-    toolbar.style.top = (vv.offsetTop + vv.height - toolbar.offsetHeight) + 'px';
+    active.classList.add('floating');
+    active.style.top = (vv.offsetTop + vv.height - active.offsetHeight) + 'px';
     bottomNav.style.visibility = vv.height < window.innerHeight * 0.75 ? 'hidden' : 'visible';
-  } else { toolbar.classList.remove('floating'); toolbar.style.top = ''; bottomNav.style.visibility = 'visible'; }
+  } else { active.classList.remove('floating'); active.style.top = ''; bottomNav.style.visibility = 'visible'; }
 }
-function showToolbar() { toolbar.classList.add('show'); positionToolbar(); }
-function hideToolbar() { toolbar.classList.remove('show', 'floating'); toolbar.style.top = ''; bottomNav.style.visibility = 'visible'; }
+function showToolbar(which) {
+  const tbDv = document.getElementById('toolbar-dv');
+  if (which === 'dv') { if(tbDv) tbDv.classList.add('show'); toolbar.classList.remove('show','floating'); }
+  else { toolbar.classList.add('show'); if(tbDv) tbDv.classList.remove('show','floating'); }
+  positionToolbar();
+}
+function hideToolbar(which) {
+  const tbDv = document.getElementById('toolbar-dv');
+  if (which === 'dv') { if(tbDv) { tbDv.classList.remove('show','floating'); tbDv.style.top=''; } }
+  else { toolbar.classList.remove('show','floating'); toolbar.style.top = ''; }
+  bottomNav.style.visibility = 'visible';
+}
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', positionToolbar);
   window.visualViewport.addEventListener('scroll', positionToolbar);
@@ -341,7 +353,8 @@ function fmt(cmd, val) {
   if (!activeEditor) return;
   activeEditor.focus(); restoreRange();
   document.execCommand(cmd, false, val || null);
-  saveRange(); updateToolbarState();
+  saveRange();
+  activeEditor === document.getElementById('dv-editor') ? updateDvToolbarState() : updateToolbarState();
   activeEditor.dispatchEvent(new Event('input'));
 }
 function toggleBullet() {
@@ -350,7 +363,8 @@ function toggleBullet() {
   const isActive = document.queryCommandState('insertUnorderedList');
   document.execCommand('insertUnorderedList', false, null);
   if (isActive) activeEditor.normalize();
-  saveRange(); updateToolbarState();
+  saveRange();
+  activeEditor === document.getElementById('dv-editor') ? updateDvToolbarState() : updateToolbarState();
   activeEditor.dispatchEvent(new Event('input'));
 }
 function updateToolbarState() {
