@@ -335,13 +335,27 @@ async function syncNotes(content) {
 const toolbar = document.getElementById('toolbar');
 const bottomNav = document.getElementById('bottom-nav');
 function positionToolbar() {
-  if (!toolbar.classList.contains('show')) return;
+  const tbDv = document.getElementById('toolbar-dv');
+  const active = (tbDv && tbDv.classList.contains('show')) ? tbDv : toolbar.classList.contains('show') ? toolbar : null;
+  if (!active) return;
   if (window.visualViewport) {
     const vv = window.visualViewport;
-    toolbar.classList.add('floating');
-    toolbar.style.top = (vv.offsetTop + vv.height - toolbar.offsetHeight) + 'px';
+    active.classList.add('floating');
+    active.style.top = (vv.offsetTop + vv.height - active.offsetHeight) + 'px';
     bottomNav.style.visibility = vv.height < window.innerHeight * 0.75 ? 'hidden' : 'visible';
-  } else { toolbar.classList.remove('floating'); toolbar.style.top = ''; bottomNav.style.visibility = 'visible'; }
+  } else { active.classList.remove('floating'); active.style.top = ''; bottomNav.style.visibility = 'visible'; }
+}
+function showToolbar(which) {
+  const tbDv = document.getElementById('toolbar-dv');
+  if (which === 'dv') { if (tbDv) tbDv.classList.add('show'); toolbar.classList.remove('show', 'floating'); }
+  else { toolbar.classList.add('show'); if (tbDv) tbDv.classList.remove('show', 'floating'); }
+  positionToolbar();
+}
+function hideToolbar(which) {
+  const tbDv = document.getElementById('toolbar-dv');
+  if (which === 'dv') { if (tbDv) { tbDv.classList.remove('show', 'floating'); tbDv.style.top = ''; } }
+  else { toolbar.classList.remove('show', 'floating'); toolbar.style.top = ''; }
+  bottomNav.style.visibility = 'visible';
 }
 
 
