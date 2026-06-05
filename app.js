@@ -533,4 +533,6 @@ document.getElementById('cal-prev').addEventListener('click', e => { e.stopPropa
 document.getElementById('cal-next').addEventListener('click', e => { e.stopPropagation(); calM++; if (calM > 11) { calM = 0; calY++; } renderCal(); });
 document.getElementById('cal-close').addEventListener('click', e => { e.stopPropagation(); document.getElementById('cal-wrap').classList.remove('show'); });
 document.getElementById('cal-wrap').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
-document.getElementById('cal-box').addEventListener('click', e => e.stopPropagation());renderWeek();
+document.getElementById('cal-box').addEventListener('click', e => e.stopPropagation());
+wireDayViewEvents();
+renderWeek();
