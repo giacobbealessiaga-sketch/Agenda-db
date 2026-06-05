@@ -136,6 +136,7 @@
     .cd.empty { cursor:default; pointer-events:none; }
     .cal-close-btn { margin-top:12px; width:100%; padding:8px; border:0.5px solid var(--border-med); border-radius:var(--radius-md); background:none; cursor:pointer; font-size:13px; color:var(--text-secondary); font-family:inherit; }
 
+    /* DAY VIEW */
     .day-view{display:none;position:fixed;inset:0;background:var(--bg-primary);z-index:50;flex-direction:column;max-width:430px;margin:0 auto;}
     .day-view.open{display:flex;}
     .dv-header{display:flex;align-items:center;gap:8px;padding:10px 12px;background:#e8f0e2;border-bottom:0.5px solid var(--border);flex-shrink:0;}
@@ -258,6 +259,7 @@
 
 <!-- OVERLAYS -->
 
+<!-- DAY VIEW -->
 <div class="day-view" id="day-view">
   <div class="dv-header">
     <button class="dv-back" id="dv-back" aria-label="Torna">&#8592;</button>
@@ -312,7 +314,6 @@
     <button class="nav-btn" id="dv-nav-menu"><i class="ti ti-settings"></i>Menu</button>
   </div>
 </div>
-
 <div class="overlay" id="appunti-overlay">
   <div class="panel">
     <div class="panel-hdr"><h3>Appunti</h3><button class="close-btn" id="appunti-close" aria-label="Chiudi">&#x2715;</button></div>
