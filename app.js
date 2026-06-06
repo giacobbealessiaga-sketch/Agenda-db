@@ -91,17 +91,20 @@ async function startApp() {
   try {
     const rows = await sb.getAllDays(session.token, session.userId);
     if (Array.isArray(rows)) {
-      // Merge: start from cloud data, but keep local cache for any keys
-      // that might have been saved after last sync
       const cloudDb = {};
       rows.forEach(r => { cloudDb[r.day_key] = r.content; });
-      // For each key in local cache that's NOT in cloud, it means it was
-      // saved locally but not yet synced — keep it and sync it up
-      const localKeys = Object.keys(db);
+      const localDb = { ...db };
       db = { ...cloudDb };
-      for (const key of localKeys) {
-        if (!cloudDb[key] && db[key]) {
-          // local has data cloud doesn't — push it up
+      // For each local key: if local has MORE content than cloud, use local and re-sync
+      for (const key of Object.keys(localDb)) {
+        const localContent = localDb[key] || '';
+        const cloudContent = cloudDb[key] || '';
+        if (localContent.length > cloudContent.length) {
+          db[key] = localContent;
+          syncDay(key); // push better local version to cloud
+        }
+        if (!cloudDb[key] && localContent) {
+          db[key] = localContent;
           syncDay(key);
         }
       }
@@ -116,20 +119,30 @@ async function startApp() {
   renderWeek();
 }
 
-// Auto-login if session exists and not expired (30 days)
+// Auto-login if session exists
 (async () => {
   if (session && session.token && session.userId) {
-    const expired = session.expiresAt && Date.now() > session.expiresAt;
-    if (!expired) {
-      try {
-        await startApp();
-        return;
-      } catch(e) {
-        console.log('Auto-login failed:', e);
+    // Try to refresh token first, then start app
+    try {
+      if (session.refreshToken) {
+        const r = await fetch('https://grmfbbqujopstaagknuc.supabase.co/auth/v1/token?grant_type=refresh_token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK' },
+          body: JSON.stringify({ refresh_token: session.refreshToken })
+        });
+        const data = await r.json();
+        if (data.access_token) {
+          session.token = data.access_token;
+          if (data.refresh_token) session.refreshToken = data.refresh_token;
+          localStorage.setItem('sb_session', JSON.stringify(session));
+        }
       }
+      await startApp();
+      return;
+    } catch(e) {
+      console.log('Auto-login failed:', e);
     }
-    session = null;
-    localStorage.removeItem('sb_session');
+    // Only clear session if refresh explicitly failed
   }
   document.getElementById('auth-screen').style.display = 'flex';
 })();
