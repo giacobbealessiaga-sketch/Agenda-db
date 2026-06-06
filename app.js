@@ -33,7 +33,7 @@ document.getElementById('btn-login').addEventListener('click', async () => {
   const res = await sb.signIn(email, password);
   btn.disabled = false; btn.textContent = 'Accedi';
   if (res.error) { errEl.textContent = res.error.message || 'Errore di accesso.'; return; }
-  session = { token: res.access_token, refreshToken: res.refresh_token, userId: res.user.id, email: res.user.email };
+  session = { token: res.access_token, refreshToken: res.refresh_token, userId: res.user.id, email: res.user.email, expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 };
   localStorage.setItem('sb_session', JSON.stringify(session));
   await startApp();
 });
@@ -91,8 +91,20 @@ async function startApp() {
   try {
     const rows = await sb.getAllDays(session.token, session.userId);
     if (Array.isArray(rows)) {
-      db = {};
-      rows.forEach(r => { db[r.day_key] = r.content; });
+      // Merge: start from cloud data, but keep local cache for any keys
+      // that might have been saved after last sync
+      const cloudDb = {};
+      rows.forEach(r => { cloudDb[r.day_key] = r.content; });
+      // For each key in local cache that's NOT in cloud, it means it was
+      // saved locally but not yet synced — keep it and sync it up
+      const localKeys = Object.keys(db);
+      db = { ...cloudDb };
+      for (const key of localKeys) {
+        if (!cloudDb[key] && db[key]) {
+          // local has data cloud doesn't — push it up
+          syncDay(key);
+        }
+      }
       saveCache();
     }
     const notes = await sb.getNotes(session.token, session.userId);
@@ -104,15 +116,17 @@ async function startApp() {
   renderWeek();
 }
 
-// Auto-login if session exists
+// Auto-login if session exists and not expired (30 days)
 (async () => {
   if (session && session.token && session.userId) {
-    try {
-      // Try to load data - if token is expired this will fail gracefully
-      await startApp();
-      return;
-    } catch(e) {
-      console.log('Auto-login failed, clearing session', e);
+    const expired = session.expiresAt && Date.now() > session.expiresAt;
+    if (!expired) {
+      try {
+        await startApp();
+        return;
+      } catch(e) {
+        console.log('Auto-login failed:', e);
+      }
     }
     session = null;
     localStorage.removeItem('sb_session');
@@ -305,6 +319,12 @@ function makeCard(d, today) {
     showToolbar('main'); updateToolbarState();
   });
   editor.addEventListener('blur', function() {
+    // Save immediately on blur — don't wait for debounce timer
+    clearTimeout(saveTimer);
+    const html = this.innerHTML;
+    if (html && html !== '<br>' && html !== '') db[key] = html; else delete db[key];
+    saveCache();
+    syncDay(key); // immediate sync on blur
     setTimeout(() => {
       if (!toolbar.contains(document.activeElement) && document.activeElement !== this) {
         card.classList.remove('active');
@@ -444,7 +464,15 @@ document.getElementById('nav-appunti').onclick = () => {
   document.getElementById('notes-area').value = localStorage.getItem('ps_notes') || '';
   document.getElementById('appunti-overlay').classList.add('show');
 };
-document.getElementById('nav-oggi').onclick = () => { weekOffset = 0; renderWeek(); setNav('oggi'); };
+document.getElementById('nav-oggi').onclick = () => {
+  weekOffset = 0; renderWeek(); setNav('oggi');
+  const today = new Date(); today.setHours(0,0,0,0);
+  const key = dayKey(today);
+  setTimeout(() => {
+    const ed = document.querySelector('.day-editor[data-key="' + key + '"]');
+    if (ed) { ed.focus(); placeCaretAtEnd(ed); }
+  }, 120);
+};
 document.getElementById('nav-menu').onclick = () => { setNav('menu'); document.getElementById('menu-overlay').classList.add('show'); };
 document.getElementById('appunti-close').onclick = () => { document.getElementById('appunti-overlay').classList.remove('show'); setNav('agenda'); };
 document.getElementById('appunti-overlay').onclick = e => { if (e.target === e.currentTarget) { e.currentTarget.classList.remove('show'); setNav('agenda'); } };
@@ -561,5 +589,19 @@ document.getElementById('cal-next').addEventListener('click', e => { e.stopPropa
 document.getElementById('cal-close').addEventListener('click', e => { e.stopPropagation(); document.getElementById('cal-wrap').classList.remove('show'); });
 document.getElementById('cal-wrap').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
 document.getElementById('cal-box').addEventListener('click', e => e.stopPropagation());
+
+// Save immediately when user leaves the page/app
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && activeEditor) {
+    const key = activeEditor.dataset.key;
+    if (key) {
+      const html = activeEditor.innerHTML;
+      if (html && html !== '<br>' && html !== '') db[key] = html; else delete db[key];
+      saveCache();
+      syncDay(key);
+    }
+  }
+});
+
 wireDayViewEvents();
 renderWeek();
