@@ -33,7 +33,7 @@ document.getElementById('btn-login').addEventListener('click', async () => {
   const res = await sb.signIn(email, password);
   btn.disabled = false; btn.textContent = 'Accedi';
   if (res.error) { errEl.textContent = res.error.message || 'Errore di accesso.'; return; }
-  session = { token: res.access_token, userId: res.user.id, email: res.user.email };
+  session = { token: res.access_token, refreshToken: res.refresh_token, userId: res.user.id, email: res.user.email };
   localStorage.setItem('sb_session', JSON.stringify(session));
   await startApp();
 });
@@ -54,9 +54,32 @@ document.getElementById('btn-signup').addEventListener('click', async () => {
 });
 
 // ── START APP ────────────────────────────────────────────────────
+
+// ── TOKEN AUTO-REFRESH ────────────────────────────────────────────
+// Refresh token every 45 minutes to avoid session expiry
+function startTokenRefresh() {
+  setInterval(async () => {
+    if (!session) return;
+    try {
+      const r = await fetch('https://grmfbbqujopstaagknuc.supabase.co/auth/v1/token?grant_type=refresh_token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK' },
+        body: JSON.stringify({ refresh_token: session.refreshToken })
+      });
+      const data = await r.json();
+      if (data.access_token) {
+        session.token = data.access_token;
+        if (data.refresh_token) session.refreshToken = data.refresh_token;
+        localStorage.setItem('sb_session', JSON.stringify(session));
+      }
+    } catch(e) { console.log('Token refresh failed', e); }
+  }, 45 * 60 * 1000); // every 45 minutes
+}
+
 async function startApp() {
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('app').classList.add('visible');
+  startTokenRefresh();
   // Render week now that app is visible (so offsetHeight is correct)
   setTimeout(() => { renderWeek(); }, 50);
   document.getElementById('hdr-email').textContent = session.email.split('@')[0];
@@ -132,8 +155,8 @@ function wireDayViewEvents() {
   const dvEd = document.getElementById('dv-editor');
   dvEd.addEventListener('input', function() {
     const key = dayKey(dvDate);
-    const html = this.innerHTML.replace(/<br\s*\/?>\s*$/, '');
-    if (html && html !== '<br>') db[key] = html; else delete db[key];
+    const html = this.innerHTML;
+    if (html && html !== '<br>' && html !== '') db[key] = html; else delete db[key];
     saveCache();
     clearTimeout(dvSaveTimer);
     dvSaveTimer = setTimeout(() => {
@@ -241,7 +264,6 @@ function renderWeek() {
   const days = [];
   for (let i = 0; i < 7; i++) { const d = new Date(mon); d.setDate(d.getDate() + i); days.push(d); }
   document.getElementById('hdr-month').textContent = MONTHS[mon.getMonth()] + ' ' + mon.getFullYear();
-  document.getElementById('hdr-week').textContent = 'Settim ' + getWeekNum(mon);
   document.getElementById('week-range').textContent =
     days[0].getDate() + ' ' + MONTHS[days[0].getMonth()] + ' – ' +
     days[6].getDate() + ' ' + MONTHS[days[6].getMonth()] + ' ' + days[6].getFullYear();
@@ -272,8 +294,8 @@ function makeCard(d, today) {
   // Debounced save to cloud
   let saveTimer = null;
   editor.addEventListener('input', function() {
-    const html = this.innerHTML.replace(/<br\s*\/?>\s*$/, '');
-    if (html && html !== '<br>') db[key] = html; else delete db[key];
+    const html = this.innerHTML;
+    if (html && html !== '<br>' && html !== '') db[key] = html; else delete db[key];
     saveCache();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => syncDay(key), 1200);
@@ -364,7 +386,11 @@ function saveRange() { const sel = window.getSelection(); if (sel && sel.rangeCo
 function restoreRange() { if (!savedRange || !activeEditor) return; try { const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(savedRange); } catch(e) {} }
 function fmt(cmd, val) {
   if (!activeEditor) return;
-  activeEditor.focus(); restoreRange();
+  activeEditor.focus();
+  // Only restore range if selection is currently collapsed or outside editor
+  const sel = window.getSelection();
+  const hasSelection = sel && !sel.isCollapsed && activeEditor.contains(sel.anchorNode);
+  if (!hasSelection) restoreRange();
   document.execCommand(cmd, false, val || null);
   saveRange();
   activeEditor === document.getElementById('dv-editor') ? updateDvToolbarState() : updateToolbarState();
@@ -413,15 +439,13 @@ document.querySelectorAll('.cm-dot').forEach(dot => {
 document.addEventListener('click', e => { if (!e.target.closest('.color-picker-wrap')) document.getElementById('color-menu').classList.remove('show'); });
 
 // ── NAVIGATION ───────────────────────────────────────────────────
-document.getElementById('prev-btn').onclick = () => { if (!isEditing) { weekOffset--; renderWeek(); } };
-document.getElementById('next-btn').onclick = () => { if (!isEditing) { weekOffset++; renderWeek(); } };
 document.getElementById('nav-agenda').onclick = () => { setNav('agenda'); document.getElementById('appunti-overlay').classList.remove('show'); };
 document.getElementById('nav-appunti').onclick = () => {
   setNav('appunti');
   document.getElementById('notes-area').value = localStorage.getItem('ps_notes') || '';
   document.getElementById('appunti-overlay').classList.add('show');
 };
-document.getElementById('nav-oggi').onclick = () => { setNav('agenda'); weekOffset = 0; renderWeek(); openDay(new Date()); };
+document.getElementById('nav-oggi').onclick = () => { weekOffset = 0; renderWeek(); setNav('oggi'); };
 document.getElementById('nav-menu').onclick = () => { setNav('menu'); document.getElementById('menu-overlay').classList.add('show'); };
 document.getElementById('appunti-close').onclick = () => { document.getElementById('appunti-overlay').classList.remove('show'); setNav('agenda'); };
 document.getElementById('appunti-overlay').onclick = e => { if (e.target === e.currentTarget) { e.currentTarget.classList.remove('show'); setNav('agenda'); } };
@@ -490,12 +514,17 @@ document.getElementById('file-input').addEventListener('change', async function(
 });
 
 // ── SWIPE ────────────────────────────────────────────────────────
-let swipeX = 0, mX = 0, mDown = false;
+let swipeX = 0, swipeY = 0, mX = 0, mDown = false;
 const nb = document.getElementById('notebook');
-nb.addEventListener('touchstart', e => { if (isEditing) return; swipeX = e.touches[0].clientX; }, { passive: true });
-nb.addEventListener('touchend', e => { if (isEditing) return; const dx = e.changedTouches[0].clientX - swipeX; if (Math.abs(dx) > 55) { dx < 0 ? weekOffset++ : weekOffset--; renderWeek(); } }, { passive: true });
+nb.addEventListener('touchstart', e => { if (isEditing) return; swipeX = e.touches[0].clientX; swipeY = e.touches[0].clientY; }, { passive: true });
+nb.addEventListener('touchend', e => {
+  if (isEditing) return;
+  const dx = e.changedTouches[0].clientX - swipeX;
+  const dy = e.changedTouches[0].clientY - swipeY;
+  if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 45) { dx < 0 ? weekOffset++ : weekOffset--; renderWeek(); }
+}, { passive: true });
 nb.addEventListener('mousedown', e => { if (isEditing || e.target.isContentEditable || e.target.closest('[contenteditable]')) return; mX = e.clientX; mDown = true; });
-nb.addEventListener('mouseup', e => { if (!mDown || isEditing) return; mDown = false; const dx = e.clientX - mX; if (Math.abs(dx) > 55) { dx < 0 ? weekOffset++ : weekOffset--; renderWeek(); } });
+nb.addEventListener('mouseup', e => { if (!mDown || isEditing) return; mDown = false; const dx = e.clientX - mX; if (Math.abs(dx) > 45) { dx < 0 ? weekOffset++ : weekOffset--; renderWeek(); } });
 
 // ── CALENDAR ─────────────────────────────────────────────────────
 function renderCal() {
