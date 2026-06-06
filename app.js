@@ -80,8 +80,9 @@ async function startApp() {
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('app').classList.add('visible');
   startTokenRefresh();
-  // Render week now that app is visible (so offsetHeight is correct)
-  setTimeout(() => { renderWeek(); }, 50);
+  // Show app immediately with cached data
+  wireDayViewEvents();
+  renderWeek();
   document.getElementById('hdr-email').textContent = session.email.split('@')[0];
   document.getElementById('menu-email').textContent = session.email;
 
@@ -105,18 +106,14 @@ async function startApp() {
 
 // Auto-login if session exists
 (async () => {
-  if (session) {
+  if (session && session.token && session.userId) {
     try {
-      const user = await sb.getUser(session.token);
-      if (user.id) {
-        session.userId = user.id;
-        session.email = user.email;
-        localStorage.setItem('sb_session', JSON.stringify(session));
-        await startApp();
-        return;
-      }
-    } catch(e) {}
-    // Token expired, clear session
+      // Try to load data - if token is expired this will fail gracefully
+      await startApp();
+      return;
+    } catch(e) {
+      console.log('Auto-login failed, clearing session', e);
+    }
     session = null;
     localStorage.removeItem('sb_session');
   }
@@ -263,8 +260,10 @@ function renderWeek() {
   const mon = getMonday(weekOffset);
   const days = [];
   for (let i = 0; i < 7; i++) { const d = new Date(mon); d.setDate(d.getDate() + i); days.push(d); }
-  document.getElementById('hdr-month').textContent = MONTHS[mon.getMonth()] + ' ' + mon.getFullYear();
-  document.getElementById('week-range').textContent =
+  const hdrMonth = document.getElementById('hdr-month');
+  if (hdrMonth) hdrMonth.textContent = MONTHS[mon.getMonth()] + ' ' + mon.getFullYear();
+  const weekRangeEl = document.getElementById('week-range');
+  if (weekRangeEl) weekRangeEl.textContent =
     days[0].getDate() + ' ' + MONTHS[days[0].getMonth()] + ' – ' +
     days[6].getDate() + ' ' + MONTHS[days[6].getMonth()] + ' ' + days[6].getFullYear();
   const left = document.getElementById('left-col'), right = document.getElementById('right-col');
