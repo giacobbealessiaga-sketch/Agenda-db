@@ -91,23 +91,8 @@ async function startApp() {
   try {
     const rows = await sb.getAllDays(session.token, session.userId);
     if (Array.isArray(rows)) {
-      const cloudDb = {};
-      rows.forEach(r => { cloudDb[r.day_key] = r.content; });
-      const localDb = { ...db };
-      db = { ...cloudDb };
-      // For each local key: if local has MORE content than cloud, use local and re-sync
-      for (const key of Object.keys(localDb)) {
-        const localContent = localDb[key] || '';
-        const cloudContent = cloudDb[key] || '';
-        if (localContent.length > cloudContent.length) {
-          db[key] = localContent;
-          syncDay(key); // push better local version to cloud
-        }
-        if (!cloudDb[key] && localContent) {
-          db[key] = localContent;
-          syncDay(key);
-        }
-      }
+      db = {};
+      rows.forEach(r => { db[r.day_key] = r.content; });
       saveCache();
     }
     const notes = await sb.getNotes(session.token, session.userId);
@@ -322,14 +307,21 @@ function makeCard(d, today) {
   editor.addEventListener('input', function() {
     const html = this.innerHTML;
     if (html && html !== '<br>' && html !== '') db[key] = html; else delete db[key];
-    saveCache();
+    saveCache(); // always save to localStorage immediately
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => syncDay(key), 1200);
+    saveTimer = setTimeout(() => syncDay(key), 800); // sync to cloud after 800ms pause
   });
 
   editor.addEventListener('focus', function() {
-    activeEditor = this; isEditing = true; card.classList.add('active');
+    activeEditor = this; isEditing = true;
+    card.classList.add('active');
     showToolbar('main'); updateToolbarState();
+    // Prevent browser from scrolling the page when card expands
+    const nb = document.getElementById('notebook');
+    if (nb) {
+      const scrollTop = nb.scrollTop;
+      requestAnimationFrame(() => { nb.scrollTop = scrollTop; });
+    }
   });
   editor.addEventListener('blur', function() {
     // Save immediately on blur — don't wait for debounce timer
