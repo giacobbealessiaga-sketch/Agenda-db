@@ -39,6 +39,38 @@ function localSave(key, html) {
   localStorage.setItem('ps_local_ts', JSON.stringify(ts));
 }
 
+
+// Sync using sendBeacon — survives page close/navigation
+// Used on blur and visibilitychange to guarantee delivery
+function syncKeyBeacon(key) {
+  if (!session || !navigator.sendBeacon) { syncKey(key); return; }
+  const content = db[key] || null;
+  const url = 'https://grmfbbqujopstaagknuc.supabase.co/rest/v1/agenda';
+  const payload = content
+    ? JSON.stringify({ user_id: session.userId, day_key: key, content: content, updated_at: new Date().toISOString() })
+    : null;
+  if (payload) {
+    const blob = new Blob([payload], { type: 'application/json' });
+    // sendBeacon doesn't support custom headers — use fetch with keepalive instead
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK',
+        'Authorization': 'Bearer ' + session.token,
+        'Prefer': 'resolution=merge-duplicates'
+      },
+      body: payload,
+      keepalive: true  // survives page close
+    }).then(() => {
+      const ts = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
+      ts[key] = Date.now();
+      localStorage.setItem('ps_sync_ts', JSON.stringify(ts));
+      setSyncState('ok');
+    }).catch(() => setSyncState('error'));
+  }
+}
+
 // Sync to Supabase — called debounced or on blur/visibilitychange
 async function syncKey(key) {
   if (!session) return;
@@ -121,43 +153,26 @@ async function startApp() {
   wireDayViewEvents();
   renderWeek(); // show immediately with cached data
 
-  // Sync pending local changes first
-  await syncAllPending();
+  // On startup: cloud is ALWAYS source of truth — reset local timestamps
+  localStorage.removeItem('ps_local_ts');
+  localStorage.removeItem('ps_sync_ts');
 
-  // Then load fresh data from cloud
   setSyncState('syncing');
   try {
     const rows = await sb.getAllDays(session.token, session.userId);
     if (Array.isArray(rows)) {
-      const localTs = JSON.parse(localStorage.getItem('ps_local_ts') || '{}');
-      const syncTs = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
-      // For each cloud row: use cloud version ONLY if local hasn't been edited after last sync
-      rows.forEach(r => {
-        const key = r.day_key;
-        const localEditTime = localTs[key] || 0;
-        const lastSyncTime = syncTs[key] || 0;
-        const hasUnsavedLocal = localEditTime > lastSyncTime;
-        const localContent = db[key] || '';
-        const cloudContent = r.content || '';
-        if (!hasUnsavedLocal) {
-          db[key] = r.content; // cloud is authoritative
-        } else if (isEmptyHtml(localContent) && !isEmptyHtml(cloudContent)) {
-          // Local is empty but cloud has content — cloud wins (avoids overwriting with empty list)
-          db[key] = r.content;
-        }
-        // else: keep local version
-      });
+      db = {};
+      rows.forEach(r => { if (r.content && !isEmptyHtml(r.content)) db[r.day_key] = r.content; });
       localStorage.setItem('ps_cache', JSON.stringify(db));
     }
     const notes = await sb.getNotes(session.token, session.userId);
     if (notes) localStorage.setItem('ps_notes', notes);
     setSyncState('ok');
-    renderWeek(); // re-render with merged data
+    renderWeek();
   } catch(e) {
     console.log('Cloud load error:', e);
     setSyncState('error');
   }
-
   startTokenRefresh();
   startPolling();
 }
@@ -339,8 +354,8 @@ function makeCard(d, today) {
   editor.addEventListener('blur', function() {
     // On blur: cancel debounce, sync immediately
     clearTimeout(syncTimer);
-    localSave(key, this.innerHTML); // ensure latest saved
-    syncKey(key); // immediate cloud sync
+    localSave(key, this.innerHTML);
+    syncKeyBeacon(key); // guaranteed sync even on page close
     setTimeout(() => {
       if (!toolbar.contains(document.activeElement) && document.activeElement !== this) {
         card.classList.remove('active');
@@ -403,7 +418,7 @@ function wireDayViewEvents() {
     const key = dayKey(dvDate);
     clearTimeout(dvSyncTimer);
     localSave(key, this.innerHTML);
-    syncKey(key);
+    syncKeyBeacon(key);
     setTimeout(() => {
       const tbDv = document.getElementById('toolbar-dv');
       if (tbDv && !tbDv.contains(document.activeElement) && document.activeElement !== this) {
@@ -478,11 +493,11 @@ document.addEventListener('visibilitychange', () => {
     // Save everything immediately when leaving
     if (activeEditor && activeEditor.dataset.key) {
       localSave(activeEditor.dataset.key, activeEditor.innerHTML);
-      syncKey(activeEditor.dataset.key);
+      syncKeyBeacon(activeEditor.dataset.key);
     }
     if (dvDate) {
       const dvEd = document.getElementById('dv-editor');
-      if (dvEd) { localSave(dayKey(dvDate), dvEd.innerHTML); syncKey(dayKey(dvDate)); }
+      if (dvEd) { localSave(dayKey(dvDate), dvEd.innerHTML); syncKeyBeacon(dayKey(dvDate)); }
     }
     syncAllPending();
   } else if (document.visibilityState === 'visible' && session && !isEditing) {
