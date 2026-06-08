@@ -1,21 +1,70 @@
 const DAYS = ['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
+const DAYS_FULL = ['Domenica','Lunedì','Martedì','Mercoledì','Giovedì','Venerdì','Sabato'];
 const MONTHS = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
-const MFULL = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+const MONTHS_FULL = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+const MFULL = MONTHS_FULL;
 
-// ── SESSION ──────────────────────────────────────────────────────
+// ── STORAGE ───────────────────────────────────────────────────────
+// db: { [dayKey]: htmlString }
+// ps_local_ts: { [dayKey]: timestamp } — when key was last edited locally
+// ps_sync_ts: { [dayKey]: timestamp } — when key was last successfully synced
+// ps_cache: serialized db
+// sb_session: auth session
+
+let db = JSON.parse(localStorage.getItem('ps_cache') || '{}');
 let session = JSON.parse(localStorage.getItem('sb_session') || 'null');
-let db = JSON.parse(localStorage.getItem('ps_cache') || '{}'); // local cache
-function saveCache() { localStorage.setItem('ps_cache', JSON.stringify(db)); }
-function dayKey(d) { return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
 
-// ── SYNC STATE ───────────────────────────────────────────────────
-function setSyncState(state) {
-  const dot = document.getElementById('sync-dot');
-  if (!dot) return;
-  dot.className = 'sync-dot ' + state;
+function dayKey(d) {
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 
-// ── AUTH ─────────────────────────────────────────────────────────
+// Save to localStorage immediately — always called on every input
+function localSave(key, html) {
+  if (html && html !== '<br>' && html.trim() !== '') {
+    db[key] = html;
+  } else {
+    delete db[key];
+  }
+  localStorage.setItem('ps_cache', JSON.stringify(db));
+  // Record edit timestamp
+  const ts = JSON.parse(localStorage.getItem('ps_local_ts') || '{}');
+  ts[key] = Date.now();
+  localStorage.setItem('ps_local_ts', JSON.stringify(ts));
+}
+
+// Sync to Supabase — called debounced or on blur/visibilitychange
+async function syncKey(key) {
+  if (!session) return;
+  setSyncState('syncing');
+  try {
+    if (db[key]) {
+      const ok = await sb.upsertDay(session.token, session.userId, key, db[key]);
+      if (!ok) throw new Error('upsert failed');
+    } else {
+      await sb.deleteDay(session.token, session.userId, key);
+    }
+    // Record sync timestamp
+    const ts = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
+    ts[key] = Date.now();
+    localStorage.setItem('ps_sync_ts', JSON.stringify(ts));
+    setSyncState('ok');
+  } catch(e) {
+    setSyncState('error');
+  }
+}
+
+// Sync all pending keys (local_ts > sync_ts)
+async function syncAllPending() {
+  if (!session) return;
+  const localTs = JSON.parse(localStorage.getItem('ps_local_ts') || '{}');
+  const syncTs = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
+  const pending = Object.keys(localTs).filter(k => !syncTs[k] || localTs[k] > syncTs[k]);
+  for (const key of pending) {
+    await syncKey(key);
+  }
+}
+
+// ── AUTH ──────────────────────────────────────────────────────────
 function showTab(tab) {
   document.getElementById('tab-login').classList.toggle('active', tab === 'login');
   document.getElementById('tab-signup').classList.toggle('active', tab === 'signup');
@@ -33,7 +82,7 @@ document.getElementById('btn-login').addEventListener('click', async () => {
   const res = await sb.signIn(email, password);
   btn.disabled = false; btn.textContent = 'Accedi';
   if (res.error) { errEl.textContent = res.error.message || 'Errore di accesso.'; return; }
-  session = { token: res.access_token, refreshToken: res.refresh_token, userId: res.user.id, email: res.user.email, expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 };
+  session = { token: res.access_token, refreshToken: res.refresh_token, userId: res.user.id, email: res.user.email };
   localStorage.setItem('sb_session', JSON.stringify(session));
   await startApp();
 });
@@ -53,82 +102,58 @@ document.getElementById('btn-signup').addEventListener('click', async () => {
   msgEl.textContent = 'Account creato! Controlla la tua email per confermare, poi accedi.';
 });
 
-// ── START APP ────────────────────────────────────────────────────
-
-// ── TOKEN AUTO-REFRESH ────────────────────────────────────────────
-// Refresh token every 45 minutes to avoid session expiry
-function startTokenRefresh() {
-  setInterval(async () => {
-    if (!session) return;
-    try {
-      const r = await fetch('https://grmfbbqujopstaagknuc.supabase.co/auth/v1/token?grant_type=refresh_token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK' },
-        body: JSON.stringify({ refresh_token: session.refreshToken })
-      });
-      const data = await r.json();
-      if (data.access_token) {
-        session.token = data.access_token;
-        if (data.refresh_token) session.refreshToken = data.refresh_token;
-        localStorage.setItem('sb_session', JSON.stringify(session));
-      }
-    } catch(e) { console.log('Token refresh failed', e); }
-  }, 45 * 60 * 1000); // every 45 minutes
-}
-
+// ── START APP ─────────────────────────────────────────────────────
 async function startApp() {
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('app').classList.add('visible');
-  startTokenRefresh();
-  // Show app immediately with cached data
-  wireDayViewEvents();
-  renderWeek();
-  document.getElementById('hdr-email').textContent = session.email.split('@')[0];
-  document.getElementById('menu-email').textContent = session.email;
+  const emailEl = document.getElementById('hdr-email');
+  const menuEmailEl = document.getElementById('menu-email');
+  if (emailEl) emailEl.textContent = session.email ? session.email.split('@')[0] : '';
+  if (menuEmailEl) menuEmailEl.textContent = session.email || '';
 
-  // Load all data from cloud into local cache
+  wireDayViewEvents();
+  renderWeek(); // show immediately with cached data
+
+  // Sync pending local changes first
+  await syncAllPending();
+
+  // Then load fresh data from cloud
   setSyncState('syncing');
   try {
     const rows = await sb.getAllDays(session.token, session.userId);
     if (Array.isArray(rows)) {
-      const synced = JSON.parse(localStorage.getItem('ps_synced') || '{}');
-      const localDb = { ...db };
-      db = {};
-      rows.forEach(r => { db[r.day_key] = r.content; });
-      // For each key in local cache: if local was modified AFTER last sync, keep local
-      for (const key of Object.keys(localDb)) {
-        const syncInfo = synced[key];
-        const localContent = localDb[key] || '';
-        const cloudContent = db[key] || '';
-        // If local content differs from what was last synced → local has unsaved changes
-        if (syncInfo && localContent !== cloudContent) {
-          const lastSyncedLen = syncInfo.len || 0;
-          // Local changed since last sync (different length from synced version)
-          if (localContent.length !== lastSyncedLen) {
-            db[key] = localContent; // keep local
-            syncDay(key); // re-push to cloud
-          }
-        } else if (!db[key] && localContent) {
-          db[key] = localContent;
-          syncDay(key);
+      const localTs = JSON.parse(localStorage.getItem('ps_local_ts') || '{}');
+      const syncTs = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
+      // For each cloud row: use cloud version ONLY if local hasn't been edited after last sync
+      rows.forEach(r => {
+        const key = r.day_key;
+        const localEditTime = localTs[key] || 0;
+        const lastSyncTime = syncTs[key] || 0;
+        const hasUnsavedLocal = localEditTime > lastSyncTime;
+        if (!hasUnsavedLocal) {
+          db[key] = r.content; // cloud is authoritative
         }
-      }
-      saveCache();
+        // else: keep local version (already synced via syncAllPending above)
+      });
+      localStorage.setItem('ps_cache', JSON.stringify(db));
     }
     const notes = await sb.getNotes(session.token, session.userId);
-    localStorage.setItem('ps_notes', notes);
+    if (notes) localStorage.setItem('ps_notes', notes);
     setSyncState('ok');
+    renderWeek(); // re-render with merged data
   } catch(e) {
+    console.log('Cloud load error:', e);
     setSyncState('error');
   }
-  renderWeek();
+
+  startTokenRefresh();
 }
 
-// Auto-login if session exists
+// Auto-login
 (async () => {
   if (session && session.token && session.userId) {
-    // Try to refresh token first, then start app
     try {
+      // Refresh token first
       if (session.refreshToken) {
         const r = await fetch('https://grmfbbqujopstaagknuc.supabase.co/auth/v1/token?grant_type=refresh_token', {
           method: 'POST',
@@ -144,131 +169,41 @@ async function startApp() {
       }
       await startApp();
       return;
-    } catch(e) {
-      console.log('Auto-login failed:', e);
-    }
-    // Only clear session if refresh explicitly failed
+    } catch(e) { console.log('Auto-login error:', e); }
   }
   document.getElementById('auth-screen').style.display = 'flex';
 })();
 
-// ── WEEK RENDERING ───────────────────────────────────────────────
-let weekOffset = 0, calY, calM;
-
-// ── DAY VIEW ──────────────────────────────────────────────────────
-const DAYS_FULL = ['Domenica','Lunedì','Martedì','Mercoledì','Giovedì','Venerdì','Sabato'];
-const MONTHS_FULL = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
-let dvDate = null;
-
-function openDay(d) {
-  d = new Date(d); d.setHours(0,0,0,0); dvDate = d;
-  renderDayView();
-  document.getElementById('day-view').classList.add('open');
-  setTimeout(() => { const ed = document.getElementById('dv-editor'); ed.focus(); placeCaretAtEnd(ed); }, 120);
-}
-function renderDayView() {
-  const key = dayKey(dvDate);
-  const today = new Date(); today.setHours(0,0,0,0);
-  document.getElementById('dv-dow').textContent = DAYS_FULL[dvDate.getDay()];
-  document.getElementById('dv-date').textContent = dvDate.getDate() + ' ' + MONTHS_FULL[dvDate.getMonth()] + ' ' + dvDate.getFullYear();
-  document.getElementById('dv-dow').style.color = dvDate.getTime() === today.getTime() ? '#c0392b' : '';
-  document.getElementById('dv-editor').innerHTML = db[key] || '';
-}
-let dvSaveTimer = null;
-// dv-editor events wired after DOM ready (see bottom)
-function closeDay() {
-  document.getElementById('day-view').classList.remove('open');
-  hideToolbar('dv'); dvDate = null; activeEditor = null;
-}
-function wireDayViewEvents() {
-  const dvEd = document.getElementById('dv-editor');
-  dvEd.addEventListener('input', function() {
-    const key = dayKey(dvDate);
-    const html = this.innerHTML;
-    if (html && html !== '<br>' && html !== '') db[key] = html; else delete db[key];
-    saveCache();
-    clearTimeout(dvSaveTimer);
-    dvSaveTimer = setTimeout(() => {
-      syncDay(key);
-      const card = document.querySelector('.day-editor[data-key="' + key + '"]');
-      if (card && document.activeElement !== card) card.innerHTML = db[key] || '';
-    }, 600);
-  });
-  dvEd.addEventListener('focus', function() { activeEditor = this; showToolbar('dv'); updateDvToolbarState(); });
-  dvEd.addEventListener('blur', function() {
-    setTimeout(() => {
-      const tbDv = document.getElementById('toolbar-dv');
-      if (tbDv && !tbDv.contains(document.activeElement) && document.activeElement !== this) {
-        if (activeEditor === this) { activeEditor = null; hideToolbar('dv'); }
+// ── TOKEN REFRESH ─────────────────────────────────────────────────
+function startTokenRefresh() {
+  setInterval(async () => {
+    if (!session || !session.refreshToken) return;
+    try {
+      const r = await fetch('https://grmfbbqujopstaagknuc.supabase.co/auth/v1/token?grant_type=refresh_token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK' },
+        body: JSON.stringify({ refresh_token: session.refreshToken })
+      });
+      const data = await r.json();
+      if (data.access_token) {
+        session.token = data.access_token;
+        if (data.refresh_token) session.refreshToken = data.refresh_token;
+        localStorage.setItem('sb_session', JSON.stringify(session));
       }
-    }, 150);
-  });
-  dvEd.addEventListener('keyup', updateDvToolbarState);
-  dvEd.addEventListener('mouseup', updateDvToolbarState);
-
-  document.getElementById('dv-back').addEventListener('click', closeDay);
-  document.getElementById('dv-prev').addEventListener('click', () => {
-    const d = new Date(dvDate); d.setDate(d.getDate() - 1); dvDate = d;
-    renderDayView(); setTimeout(() => document.getElementById('dv-editor').focus(), 50);
-  });
-  document.getElementById('dv-next').addEventListener('click', () => {
-    const d = new Date(dvDate); d.setDate(d.getDate() + 1); dvDate = d;
-    renderDayView(); setTimeout(() => document.getElementById('dv-editor').focus(), 50);
-  });
-  document.getElementById('dv-nav-oggi').addEventListener('click', () => openDay(new Date()));
-  document.getElementById('dv-nav-appunti').addEventListener('click', () => {
-    closeDay();
-    document.getElementById('notes-area').value = localStorage.getItem('ps_notes') || '';
-    document.getElementById('appunti-overlay').classList.add('show');
-  });
-  const dvMenu = document.getElementById('dv-nav-menu');
-  if (dvMenu) dvMenu.addEventListener('click', () => {
-    closeDay();
-    const mo = document.getElementById('menu-overlay');
-    if (mo) mo.classList.add('show');
-    setNav('menu');
-  });
-
-  // DV toolbar buttons
-  function tbDvBind(id, fn) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener('mousedown', e => { e.preventDefault(); fn(); });
-    el.addEventListener('touchend', e => { e.preventDefault(); fn(); });
-  }
-  tbDvBind('dv-bold', () => fmt('bold'));
-  tbDvBind('dv-italic', () => fmt('italic'));
-  tbDvBind('dv-under', () => fmt('underline'));
-  tbDvBind('dv-strike', () => fmt('strikeThrough'));
-  tbDvBind('dv-ul', toggleBullet);
-
-  document.getElementById('dv-cur-color').addEventListener('mousedown', e => {
-    e.preventDefault(); e.stopPropagation();
-    document.getElementById('dv-color-menu').classList.toggle('show');
-  });
-  document.querySelectorAll('#dv-color-menu .cm-dot').forEach(dot => {
-    const apply = function(e) {
-      e.preventDefault(); e.stopPropagation();
-      currentColor = this.dataset.color;
-      document.getElementById('dv-cur-color').style.background = currentColor;
-      document.querySelectorAll('#dv-color-menu .cm-dot').forEach(d => d.classList.remove('active'));
-      this.classList.add('active');
-      document.getElementById('dv-color-menu').classList.remove('show');
-      fmt('foreColor', currentColor);
-    };
-    dot.addEventListener('mousedown', apply); dot.addEventListener('touchend', apply);
-  });
-}
-function updateDvToolbarState() {
-  if (!activeEditor) return; saveRange();
-  const map = {bold:'dv-bold',italic:'dv-italic',underline:'dv-under',strikeThrough:'dv-strike',insertUnorderedList:'dv-ul'};
-  Object.entries(map).forEach(([cmd, id]) => {
-    const el = document.getElementById(id); if (el) el.classList.toggle('on', document.queryCommandState(cmd));
-  });
+    } catch(e) {}
+  }, 45 * 60 * 1000);
 }
 
-let activeEditor = null, savedRange = null, currentColor = '#1a1a1a';
-let isEditing = false;
+// ── SYNC STATE ────────────────────────────────────────────────────
+function setSyncState(state) {
+  const dot = document.getElementById('sync-dot');
+  if (!dot) return;
+  dot.className = 'sync-dot ' + state;
+}
+
+// ── WEEK / DAY VIEW ───────────────────────────────────────────────
+let weekOffset = 0, calY, calM;
+let dvDate = null;
 
 function getMonday(offset) {
   const t = new Date(); t.setHours(0,0,0,0);
@@ -287,17 +222,12 @@ function buildSpiral() {
     const r = document.createElement('div'); r.className = 'ring'; col.appendChild(r);
   }
 }
-
 function renderWeek() {
   const mon = getMonday(weekOffset);
   const days = [];
   for (let i = 0; i < 7; i++) { const d = new Date(mon); d.setDate(d.getDate() + i); days.push(d); }
   const hdrMonth = document.getElementById('hdr-month');
   if (hdrMonth) hdrMonth.textContent = MONTHS[mon.getMonth()] + ' ' + mon.getFullYear();
-  const weekRangeEl = document.getElementById('week-range');
-  if (weekRangeEl) weekRangeEl.textContent =
-    days[0].getDate() + ' ' + MONTHS[days[0].getMonth()] + ' – ' +
-    days[6].getDate() + ' ' + MONTHS[days[6].getMonth()] + ' ' + days[6].getFullYear();
   const left = document.getElementById('left-col'), right = document.getElementById('right-col');
   left.innerHTML = ''; right.innerHTML = '';
   const today = new Date(); today.setHours(0,0,0,0);
@@ -312,34 +242,38 @@ function renderWeek() {
 function makeCard(d, today) {
   const key = dayKey(d), isToday = d.getTime() === today.getTime();
   const card = document.createElement('div'); card.className = 'day-card'; card.dataset.key = key;
+
   const hdr = document.createElement('div');
   hdr.className = 'day-hdr' + (isToday ? ' today' : '');
   hdr.innerHTML = '<span class="dow">' + DAYS[d.getDay()] + '</span><span class="num">' + d.getDate() + '</span><span class="mon-lbl">' + MONTHS[d.getMonth()] + '</span>';
+  hdr.addEventListener('click', () => openDay(d));
+
   const body = document.createElement('div'); body.className = 'day-body';
   const lines = document.createElement('div'); lines.className = 'day-lines';
+
   const editor = document.createElement('div');
-  editor.className = 'day-editor'; editor.contentEditable = 'true';
-  editor.setAttribute('spellcheck', 'true'); editor.dataset.key = key;
+  editor.className = 'day-editor';
+  editor.contentEditable = 'true';
+  editor.setAttribute('spellcheck', 'true');
+  editor.dataset.key = key;
   if (db[key]) editor.innerHTML = db[key];
 
-  // Debounced save to cloud
-  let saveTimer = null;
+  let syncTimer = null;
+
   editor.addEventListener('input', function() {
-    const html = this.innerHTML;
-    if (html && html !== '<br>' && html !== '') db[key] = html; else delete db[key];
-    saveCache(); // always save to localStorage immediately
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => syncDay(key), 800); // sync to cloud after 800ms pause
+    // 1. Save to localStorage IMMEDIATELY — no debounce
+    localSave(key, this.innerHTML);
+    // 2. Schedule cloud sync after 1500ms of inactivity
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => syncKey(key), 1500);
   });
 
   editor.addEventListener('focus', function() {
     activeEditor = this; isEditing = true;
-    // Lock notebook scroll position before card expands
     const nb = document.getElementById('notebook');
     const savedScroll = nb ? nb.scrollTop : 0;
     card.classList.add('active');
     showToolbar('main'); updateToolbarState();
-    // Restore scroll immediately and on next frame
     if (nb) {
       nb.scrollTop = savedScroll;
       requestAnimationFrame(() => {
@@ -348,13 +282,12 @@ function makeCard(d, today) {
       });
     }
   });
+
   editor.addEventListener('blur', function() {
-    // Save immediately on blur — don't wait for debounce timer
-    clearTimeout(saveTimer);
-    const html = this.innerHTML;
-    if (html && html !== '<br>' && html !== '') db[key] = html; else delete db[key];
-    saveCache();
-    syncDay(key); // immediate sync on blur
+    // On blur: cancel debounce, sync immediately
+    clearTimeout(syncTimer);
+    localSave(key, this.innerHTML); // ensure latest saved
+    syncKey(key); // immediate cloud sync
     setTimeout(() => {
       if (!toolbar.contains(document.activeElement) && document.activeElement !== this) {
         card.classList.remove('active');
@@ -362,46 +295,157 @@ function makeCard(d, today) {
       }
     }, 150);
   });
+
   editor.addEventListener('keyup', updateToolbarState);
   editor.addEventListener('mouseup', updateToolbarState);
   body.addEventListener('touchmove', e => { if (isEditing) e.stopPropagation(); }, { passive: true });
   body.addEventListener('click', e => { if (e.target === body || e.target === lines) { editor.focus(); placeCaretAtEnd(editor); } });
-  hdr.addEventListener('click', () => openDay(d));
+
   body.appendChild(lines); body.appendChild(editor);
   card.appendChild(hdr); card.appendChild(body);
   return card;
 }
 
-// ── SYNC ─────────────────────────────────────────────────────────
-async function syncDay(key) {
-  if (!session) return;
-  setSyncState('syncing');
-  try {
-    if (db[key]) {
-      await sb.upsertDay(session.token, session.userId, key, db[key]);
-    } else {
-      await sb.deleteDay(session.token, session.userId, key);
+// ── DAY VIEW ──────────────────────────────────────────────────────
+function openDay(d) {
+  d = new Date(d); d.setHours(0,0,0,0); dvDate = d;
+  renderDayView();
+  document.getElementById('day-view').classList.add('open');
+  setTimeout(() => { const ed = document.getElementById('dv-editor'); if(ed){ed.focus(); placeCaretAtEnd(ed);} }, 120);
+}
+function renderDayView() {
+  const key = dayKey(dvDate);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const dowEl = document.getElementById('dv-dow');
+  const dateEl = document.getElementById('dv-date');
+  if (dowEl) dowEl.textContent = DAYS_FULL[dvDate.getDay()];
+  if (dateEl) dateEl.textContent = dvDate.getDate() + ' ' + MONTHS_FULL[dvDate.getMonth()] + ' ' + dvDate.getFullYear();
+  if (dowEl) dowEl.style.color = dvDate.getTime() === today.getTime() ? '#c0392b' : '';
+  const ed = document.getElementById('dv-editor');
+  if (ed) ed.innerHTML = db[key] || '';
+}
+function closeDay() {
+  document.getElementById('day-view').classList.remove('open');
+  hideToolbar('dv'); dvDate = null; activeEditor = null;
+}
+function wireDayViewEvents() {
+  const dvEd = document.getElementById('dv-editor');
+  if (!dvEd) return;
+  let dvSyncTimer = null;
+
+  dvEd.addEventListener('input', function() {
+    if (!dvDate) return;
+    const key = dayKey(dvDate);
+    localSave(key, this.innerHTML);
+    clearTimeout(dvSyncTimer);
+    dvSyncTimer = setTimeout(() => syncKey(key), 1500);
+    // update week card preview
+    const card = document.querySelector('.day-editor[data-key="' + key + '"]');
+    if (card && document.activeElement !== card) card.innerHTML = db[key] || '';
+  });
+
+  dvEd.addEventListener('focus', function() { activeEditor = this; showToolbar('dv'); updateDvToolbarState(); });
+  dvEd.addEventListener('blur', function() {
+    if (!dvDate) return;
+    const key = dayKey(dvDate);
+    clearTimeout(dvSyncTimer);
+    localSave(key, this.innerHTML);
+    syncKey(key);
+    setTimeout(() => {
+      const tbDv = document.getElementById('toolbar-dv');
+      if (tbDv && !tbDv.contains(document.activeElement) && document.activeElement !== this) {
+        if (activeEditor === this) { activeEditor = null; hideToolbar('dv'); }
+      }
+    }, 150);
+  });
+  dvEd.addEventListener('keyup', updateDvToolbarState);
+  dvEd.addEventListener('mouseup', updateDvToolbarState);
+
+  document.getElementById('dv-back').addEventListener('click', closeDay);
+  document.getElementById('dv-prev').addEventListener('click', () => {
+    const d = new Date(dvDate); d.setDate(d.getDate() - 1); dvDate = d;
+    renderDayView(); setTimeout(() => { const e=document.getElementById('dv-editor'); if(e)e.focus(); }, 50);
+  });
+  document.getElementById('dv-next').addEventListener('click', () => {
+    const d = new Date(dvDate); d.setDate(d.getDate() + 1); dvDate = d;
+    renderDayView(); setTimeout(() => { const e=document.getElementById('dv-editor'); if(e)e.focus(); }, 50);
+  });
+  document.getElementById('dv-nav-oggi').addEventListener('click', () => openDay(new Date()));
+  document.getElementById('dv-nav-appunti').addEventListener('click', () => {
+    closeDay();
+    document.getElementById('notes-area').value = localStorage.getItem('ps_notes') || '';
+    document.getElementById('appunti-overlay').classList.add('show');
+  });
+  const dvMenu = document.getElementById('dv-nav-menu');
+  if (dvMenu) dvMenu.addEventListener('click', () => {
+    closeDay();
+    const mo = document.getElementById('menu-overlay');
+    if (mo) mo.classList.add('show');
+    setNav('menu');
+  });
+
+  // DV toolbar
+  function tbDvBind(id, fn) {
+    const el = document.getElementById(id); if (!el) return;
+    el.addEventListener('mousedown', e => { e.preventDefault(); fn(); });
+    el.addEventListener('touchend', e => { e.preventDefault(); fn(); });
+  }
+  tbDvBind('dv-bold', () => fmt('bold'));
+  tbDvBind('dv-italic', () => fmt('italic'));
+  tbDvBind('dv-under', () => fmt('underline'));
+  tbDvBind('dv-strike', () => fmt('strikeThrough'));
+  tbDvBind('dv-ul', toggleBullet);
+
+  const dvCurColor = document.getElementById('dv-cur-color');
+  if (dvCurColor) {
+    dvCurColor.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); document.getElementById('dv-color-menu').classList.toggle('show'); });
+    document.querySelectorAll('#dv-color-menu .cm-dot').forEach(dot => {
+      const apply = function(e) {
+        e.preventDefault(); e.stopPropagation();
+        currentColor = this.dataset.color;
+        dvCurColor.style.background = currentColor;
+        document.querySelectorAll('#dv-color-menu .cm-dot').forEach(d => d.classList.remove('active'));
+        this.classList.add('active');
+        document.getElementById('dv-color-menu').classList.remove('show');
+        fmt('foreColor', currentColor);
+      };
+      dot.addEventListener('mousedown', apply); dot.addEventListener('touchend', apply);
+    });
+  }
+}
+function updateDvToolbarState() {
+  if (!activeEditor) return; saveRange();
+  const map = {bold:'dv-bold',italic:'dv-italic',underline:'dv-under',strikeThrough:'dv-strike',insertUnorderedList:'dv-ul'};
+  Object.entries(map).forEach(([cmd,id]) => { const el=document.getElementById(id); if(el) el.classList.toggle('on', document.queryCommandState(cmd)); });
+}
+
+// Save on visibility change (switching apps on mobile)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    // Sync all pending immediately
+    syncAllPending();
+    // Also save active editor content
+    if (activeEditor && activeEditor.dataset.key) {
+      localSave(activeEditor.dataset.key, activeEditor.innerHTML);
+      syncKey(activeEditor.dataset.key);
     }
-    // Mark this key as successfully synced with current content hash
-    const synced = JSON.parse(localStorage.getItem('ps_synced') || '{}');
-    synced[key] = { ts: Date.now(), len: (db[key] || '').length };
-    localStorage.setItem('ps_synced', JSON.stringify(synced));
-    setSyncState('ok');
-  } catch(e) { setSyncState('error'); }
-}
+    if (dvDate) {
+      const dvEd = document.getElementById('dv-editor');
+      if (dvEd) {
+        localSave(dayKey(dvDate), dvEd.innerHTML);
+        syncKey(dayKey(dvDate));
+      }
+    }
+  }
+});
 
-async function syncNotes(content) {
-  if (!session) return;
-  setSyncState('syncing');
-  try {
-    await sb.upsertNotes(session.token, session.userId, content);
-    setSyncState('ok');
-  } catch(e) { setSyncState('error'); }
-}
+// ── TOOLBAR ───────────────────────────────────────────────────────
+let activeEditor = null, savedRange = null, currentColor = '#1a1a1a';
+let isEditing = false;
 
-// ── TOOLBAR ──────────────────────────────────────────────────────
 const toolbar = document.getElementById('toolbar');
 const bottomNav = document.getElementById('bottom-nav');
+
 function positionToolbar() {
   const tbDv = document.getElementById('toolbar-dv');
   const active = (tbDv && tbDv.classList.contains('show')) ? tbDv : toolbar.classList.contains('show') ? toolbar : null;
@@ -415,32 +459,31 @@ function positionToolbar() {
 }
 function showToolbar(which) {
   const tbDv = document.getElementById('toolbar-dv');
-  if (which === 'dv') { if (tbDv) tbDv.classList.add('show'); toolbar.classList.remove('show', 'floating'); }
-  else { toolbar.classList.add('show'); if (tbDv) tbDv.classList.remove('show', 'floating'); }
+  if (which === 'dv') { if (tbDv) tbDv.classList.add('show'); toolbar.classList.remove('show','floating'); }
+  else { toolbar.classList.add('show'); if (tbDv) tbDv.classList.remove('show','floating'); }
   positionToolbar();
 }
 function hideToolbar(which) {
   const tbDv = document.getElementById('toolbar-dv');
-  if (which === 'dv') { if (tbDv) { tbDv.classList.remove('show', 'floating'); tbDv.style.top = ''; } }
-  else { toolbar.classList.remove('show', 'floating'); toolbar.style.top = ''; }
+  if (which === 'dv') { if (tbDv) { tbDv.classList.remove('show','floating'); tbDv.style.top=''; } }
+  else { toolbar.classList.remove('show','floating'); toolbar.style.top = ''; }
   bottomNav.style.visibility = 'visible';
 }
-
-
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', positionToolbar);
   window.visualViewport.addEventListener('scroll', positionToolbar);
 }
+
 function placeCaretAtEnd(el) {
   const range = document.createRange(); range.selectNodeContents(el); range.collapse(false);
   const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
 }
-function saveRange() { const sel = window.getSelection(); if (sel && sel.rangeCount > 0) savedRange = sel.getRangeAt(0).cloneRange(); }
-function restoreRange() { if (!savedRange || !activeEditor) return; try { const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(savedRange); } catch(e) {} }
+function saveRange() { const s = window.getSelection(); if (s && s.rangeCount > 0) savedRange = s.getRangeAt(0).cloneRange(); }
+function restoreRange() { if (!savedRange || !activeEditor) return; try { const s = window.getSelection(); s.removeAllRanges(); s.addRange(savedRange); } catch(e) {} }
+
 function fmt(cmd, val) {
   if (!activeEditor) return;
   activeEditor.focus();
-  // Only restore range if selection is currently collapsed or outside editor
   const sel = window.getSelection();
   const hasSelection = sel && !sel.isCollapsed && activeEditor.contains(sel.anchorNode);
   if (!hasSelection) restoreRange();
@@ -452,22 +495,21 @@ function fmt(cmd, val) {
 function toggleBullet() {
   if (!activeEditor) return;
   activeEditor.focus(); restoreRange();
-  const isActive = document.queryCommandState('insertUnorderedList');
+  const was = document.queryCommandState('insertUnorderedList');
   document.execCommand('insertUnorderedList', false, null);
-  if (isActive) activeEditor.normalize();
+  if (was) activeEditor.normalize();
   saveRange();
   activeEditor === document.getElementById('dv-editor') ? updateDvToolbarState() : updateToolbarState();
   activeEditor.dispatchEvent(new Event('input'));
 }
 function updateToolbarState() {
   if (!activeEditor) return; saveRange();
-  ['bold','italic','underline','strikeThrough','insertUnorderedList'].forEach(cmd => {
-    const map = { bold:'tb-bold', italic:'tb-italic', underline:'tb-under', strikeThrough:'tb-strike', insertUnorderedList:'tb-ul' };
-    document.getElementById(map[cmd]).classList.toggle('on', document.queryCommandState(cmd));
-  });
+  const map = {bold:'tb-bold',italic:'tb-italic',underline:'tb-under',strikeThrough:'tb-strike',insertUnorderedList:'tb-ul'};
+  Object.entries(map).forEach(([cmd,id]) => { const el=document.getElementById(id); if(el) el.classList.toggle('on', document.queryCommandState(cmd)); });
 }
+
 function tbBind(id, fn) {
-  const el = document.getElementById(id);
+  const el = document.getElementById(id); if (!el) return;
   el.addEventListener('mousedown', e => { e.preventDefault(); fn(); });
   el.addEventListener('touchend', e => { e.preventDefault(); fn(); });
 }
@@ -476,22 +518,41 @@ tbBind('tb-italic', () => fmt('italic'));
 tbBind('tb-under', () => fmt('underline'));
 tbBind('tb-strike', () => fmt('strikeThrough'));
 tbBind('tb-ul', toggleBullet);
+
 document.getElementById('cur-color').addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); document.getElementById('color-menu').classList.toggle('show'); });
-document.querySelectorAll('.cm-dot').forEach(dot => {
+document.querySelectorAll('#color-menu .cm-dot').forEach(dot => {
   const apply = function(e) {
     e.preventDefault(); e.stopPropagation();
     currentColor = this.dataset.color;
     document.getElementById('cur-color').style.background = currentColor;
-    document.querySelectorAll('.cm-dot').forEach(d => d.classList.remove('active'));
+    document.querySelectorAll('#color-menu .cm-dot').forEach(d => d.classList.remove('active'));
     this.classList.add('active');
     document.getElementById('color-menu').classList.remove('show');
     fmt('foreColor', currentColor);
   };
   dot.addEventListener('mousedown', apply); dot.addEventListener('touchend', apply);
 });
-document.addEventListener('click', e => { if (!e.target.closest('.color-picker-wrap')) document.getElementById('color-menu').classList.remove('show'); });
+document.addEventListener('click', e => {
+  if (!e.target.closest('.color-picker-wrap')) {
+    document.getElementById('color-menu').classList.remove('show');
+    const dvcm = document.getElementById('dv-color-menu');
+    if (dvcm) dvcm.classList.remove('show');
+  }
+});
 
-// ── NAVIGATION ───────────────────────────────────────────────────
+// ── NAVIGATION ────────────────────────────────────────────────────
+let swipeX = 0, swipeY = 0, mX = 0, mDown = false;
+const nb = document.getElementById('notebook');
+nb.addEventListener('touchstart', e => { if (isEditing) return; swipeX = e.touches[0].clientX; swipeY = e.touches[0].clientY; }, { passive: true });
+nb.addEventListener('touchend', e => {
+  if (isEditing) return;
+  const dx = e.changedTouches[0].clientX - swipeX;
+  const dy = e.changedTouches[0].clientY - swipeY;
+  if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 45) { dx < 0 ? weekOffset++ : weekOffset--; renderWeek(); }
+}, { passive: true });
+nb.addEventListener('mousedown', e => { if (isEditing || e.target.isContentEditable || e.target.closest('[contenteditable]')) return; mX = e.clientX; mDown = true; });
+nb.addEventListener('mouseup', e => { if (!mDown || isEditing) return; mDown = false; const dx = e.clientX - mX; if (Math.abs(dx) > 45) { dx < 0 ? weekOffset++ : weekOffset--; renderWeek(); } });
+
 document.getElementById('nav-agenda').onclick = () => { setNav('agenda'); document.getElementById('appunti-overlay').classList.remove('show'); };
 document.getElementById('nav-appunti').onclick = () => {
   setNav('appunti');
@@ -499,37 +560,35 @@ document.getElementById('nav-appunti').onclick = () => {
   document.getElementById('appunti-overlay').classList.add('show');
 };
 document.getElementById('nav-oggi').onclick = () => {
-  weekOffset = 0; renderWeek(); setNav('oggi');
+  setNav('agenda'); weekOffset = 0; renderWeek();
   const today = new Date(); today.setHours(0,0,0,0);
   const key = dayKey(today);
-  setTimeout(() => {
-    const ed = document.querySelector('.day-editor[data-key="' + key + '"]');
-    if (ed) { ed.focus(); placeCaretAtEnd(ed); }
-  }, 120);
+  setTimeout(() => { const ed = document.querySelector('.day-editor[data-key="' + key + '"]'); if (ed) { ed.focus(); placeCaretAtEnd(ed); } }, 120);
 };
 document.getElementById('nav-menu').onclick = () => { setNav('menu'); document.getElementById('menu-overlay').classList.add('show'); };
 document.getElementById('appunti-close').onclick = () => { document.getElementById('appunti-overlay').classList.remove('show'); setNav('agenda'); };
 document.getElementById('appunti-overlay').onclick = e => { if (e.target === e.currentTarget) { e.currentTarget.classList.remove('show'); setNav('agenda'); } };
-document.getElementById('menu-close').onclick = () => { document.getElementById('menu-overlay').classList.remove('show'); setNav('agenda'); };
-document.getElementById('menu-overlay').onclick = e => { if (e.target === e.currentTarget) { e.currentTarget.classList.remove('show'); setNav('agenda'); } };
-
 document.getElementById('save-note-btn').onclick = function() {
   const content = document.getElementById('notes-area').value;
   localStorage.setItem('ps_notes', content);
-  syncNotes(content);
+  sb.upsertNotes(session.token, session.userId, content).catch(()=>{});
   this.textContent = 'Salvato!'; setTimeout(() => this.textContent = 'Salva appunti', 1500);
 };
+document.getElementById('menu-close').onclick = () => { document.getElementById('menu-overlay').classList.remove('show'); setNav('agenda'); };
+document.getElementById('menu-overlay').onclick = e => { if (e.target === e.currentTarget) { e.currentTarget.classList.remove('show'); setNav('agenda'); } };
 
-function setNav(w) { ['agenda','appunti','oggi','menu'].forEach(n => document.getElementById('nav-' + n).classList.toggle('active', n === w)); }
+function setNav(w) { ['agenda','appunti','oggi','menu'].forEach(n => { const el = document.getElementById('nav-' + n); if(el) el.classList.toggle('active', n === w); }); }
 
-// ── LOGOUT ───────────────────────────────────────────────────────
+// ── LOGOUT ────────────────────────────────────────────────────────
 document.getElementById('btn-logout').onclick = async () => {
   if (!confirm('Vuoi uscire dall\'account?')) return;
-  await sb.signOut(session.token);
+  await sb.signOut(session.token).catch(()=>{});
   session = null; db = {};
   localStorage.removeItem('sb_session');
   localStorage.removeItem('ps_cache');
   localStorage.removeItem('ps_notes');
+  localStorage.removeItem('ps_local_ts');
+  localStorage.removeItem('ps_sync_ts');
   document.getElementById('menu-overlay').classList.remove('show');
   document.getElementById('app').classList.remove('visible');
   document.getElementById('auth-screen').style.display = 'flex';
@@ -538,7 +597,7 @@ document.getElementById('btn-logout').onclick = async () => {
   showTab('login');
 };
 
-// ── EXPORT / IMPORT ──────────────────────────────────────────────
+// ── EXPORT / IMPORT ───────────────────────────────────────────────
 document.getElementById('btn-export').onclick = () => {
   const payload = { version: 1, exported: new Date().toISOString(), agenda: db, notes: localStorage.getItem('ps_notes') || '' };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -556,15 +615,15 @@ document.getElementById('file-input').addEventListener('change', async function(
       const data = JSON.parse(e.target.result);
       if (!data.version || !data.agenda) { alert('File non valido.'); return; }
       if (!confirm('Importare i dati? I dati attuali verranno sostituiti.')) return;
-      db = data.agenda; saveCache();
+      db = data.agenda;
+      localStorage.setItem('ps_cache', JSON.stringify(db));
       if (data.notes) localStorage.setItem('ps_notes', data.notes);
-      // Sync all to cloud
-      setSyncState('syncing');
-      for (const [key, content] of Object.entries(db)) {
-        await sb.upsertDay(session.token, session.userId, key, content);
-      }
-      if (data.notes) await sb.upsertNotes(session.token, session.userId, data.notes);
-      setSyncState('ok');
+      // Mark all as needing sync
+      const ts = {};
+      Object.keys(db).forEach(k => { ts[k] = Date.now(); });
+      localStorage.setItem('ps_local_ts', JSON.stringify(ts));
+      localStorage.removeItem('ps_sync_ts');
+      await syncAllPending();
       renderWeek();
       document.getElementById('menu-overlay').classList.remove('show');
       setNav('agenda');
@@ -574,20 +633,7 @@ document.getElementById('file-input').addEventListener('change', async function(
   reader.readAsText(file); this.value = '';
 });
 
-// ── SWIPE ────────────────────────────────────────────────────────
-let swipeX = 0, swipeY = 0, mX = 0, mDown = false;
-const nb = document.getElementById('notebook');
-nb.addEventListener('touchstart', e => { if (isEditing) return; swipeX = e.touches[0].clientX; swipeY = e.touches[0].clientY; }, { passive: true });
-nb.addEventListener('touchend', e => {
-  if (isEditing) return;
-  const dx = e.changedTouches[0].clientX - swipeX;
-  const dy = e.changedTouches[0].clientY - swipeY;
-  if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 45) { dx < 0 ? weekOffset++ : weekOffset--; renderWeek(); }
-}, { passive: true });
-nb.addEventListener('mousedown', e => { if (isEditing || e.target.isContentEditable || e.target.closest('[contenteditable]')) return; mX = e.clientX; mDown = true; });
-nb.addEventListener('mouseup', e => { if (!mDown || isEditing) return; mDown = false; const dx = e.clientX - mX; if (Math.abs(dx) > 45) { dx < 0 ? weekOffset++ : weekOffset--; renderWeek(); } });
-
-// ── CALENDAR ─────────────────────────────────────────────────────
+// ── CALENDAR ──────────────────────────────────────────────────────
 function renderCal() {
   const grid = document.getElementById('cgrid'); grid.innerHTML = '';
   document.getElementById('cal-label').textContent = MFULL[calM] + ' ' + calY;
@@ -623,19 +669,6 @@ document.getElementById('cal-next').addEventListener('click', e => { e.stopPropa
 document.getElementById('cal-close').addEventListener('click', e => { e.stopPropagation(); document.getElementById('cal-wrap').classList.remove('show'); });
 document.getElementById('cal-wrap').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('show'); });
 document.getElementById('cal-box').addEventListener('click', e => e.stopPropagation());
-
-// Save immediately when user leaves the page/app
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && activeEditor) {
-    const key = activeEditor.dataset.key;
-    if (key) {
-      const html = activeEditor.innerHTML;
-      if (html && html !== '<br>' && html !== '') db[key] = html; else delete db[key];
-      saveCache();
-      syncDay(key);
-    }
-  }
-});
 
 wireDayViewEvents();
 renderWeek();
