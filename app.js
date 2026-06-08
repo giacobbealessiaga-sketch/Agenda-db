@@ -358,11 +358,27 @@ function makeCard(d, today) {
     const savedScroll = nb ? nb.scrollTop : 0;
     card.classList.add('active');
     showToolbar('main'); updateToolbarState();
+    // After expansion, scroll so card top is visible
     if (nb) {
-      nb.scrollTop = savedScroll;
       requestAnimationFrame(() => {
-        nb.scrollTop = savedScroll;
-        setTimeout(() => { nb.scrollTop = savedScroll; }, 50);
+        // Find card's position relative to notebook
+        const cardTop = card.offsetTop;
+        const nbHeight = nb.clientHeight;
+        const cardHeight = card.offsetHeight;
+        // Only scroll if card top is above viewport
+        if (cardTop < nb.scrollTop) {
+          nb.scrollTop = cardTop;
+        }
+        // If card is taller than viewport, just show the top
+        else if (cardTop < nb.scrollTop + 10) {
+          nb.scrollTop = cardTop;
+        }
+        // Don't let browser scroll beyond what we set
+        setTimeout(() => {
+          if (card.offsetTop < nb.scrollTop) {
+            nb.scrollTop = card.offsetTop;
+          }
+        }, 80);
       });
     }
   });
