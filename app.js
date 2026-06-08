@@ -18,9 +18,16 @@ function dayKey(d) {
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 
+// Check if HTML content is effectively empty
+function isEmptyHtml(html) {
+  if (!html) return true;
+  const text = html.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, '').trim();
+  return text === '';
+}
+
 // Save to localStorage immediately — always called on every input
 function localSave(key, html) {
-  if (html && html !== '<br>' && html.trim() !== '') {
+  if (html && !isEmptyHtml(html)) {
     db[key] = html;
   } else {
     delete db[key];
@@ -130,10 +137,15 @@ async function startApp() {
         const localEditTime = localTs[key] || 0;
         const lastSyncTime = syncTs[key] || 0;
         const hasUnsavedLocal = localEditTime > lastSyncTime;
+        const localContent = db[key] || '';
+        const cloudContent = r.content || '';
         if (!hasUnsavedLocal) {
           db[key] = r.content; // cloud is authoritative
+        } else if (isEmptyHtml(localContent) && !isEmptyHtml(cloudContent)) {
+          // Local is empty but cloud has content — cloud wins (avoids overwriting with empty list)
+          db[key] = r.content;
         }
-        // else: keep local version (already synced via syncAllPending above)
+        // else: keep local version
       });
       localStorage.setItem('ps_cache', JSON.stringify(db));
     }
@@ -147,6 +159,7 @@ async function startApp() {
   }
 
   startTokenRefresh();
+  startPolling();
 }
 
 // Auto-login
@@ -192,6 +205,46 @@ function startTokenRefresh() {
       }
     } catch(e) {}
   }, 45 * 60 * 1000);
+}
+
+
+// ── POLLING SYNC ─────────────────────────────────────────────────
+// Refresh data from cloud every 30s if tab is visible and not editing
+function startPolling() {
+  setInterval(async () => {
+    if (!session || document.visibilityState !== 'visible' || isEditing) return;
+    try {
+      const rows = await sb.getAllDays(session.token, session.userId);
+      if (!Array.isArray(rows)) return;
+      const localTs = JSON.parse(localStorage.getItem('ps_local_ts') || '{}');
+      const syncTs = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
+      let changed = false;
+      rows.forEach(r => {
+        const key = r.day_key;
+        const localEditTime = localTs[key] || 0;
+        const lastSyncTime = syncTs[key] || 0;
+        const hasUnsavedLocal = localEditTime > lastSyncTime;
+        if (!hasUnsavedLocal || isEmptyHtml(db[key] || '')) {
+          if (db[key] !== r.content) { db[key] = r.content; changed = true; }
+        }
+      });
+      // Also handle keys deleted on other device
+      const cloudKeys = new Set(rows.map(r => r.day_key));
+      Object.keys(db).forEach(key => {
+        const localEditTime = localTs[key] || 0;
+        const lastSyncTime = syncTs[key] || 0;
+        const hasUnsavedLocal = localEditTime > lastSyncTime;
+        if (!hasUnsavedLocal && !cloudKeys.has(key)) {
+          delete db[key];
+          changed = true;
+        }
+      });
+      if (changed) {
+        localStorage.setItem('ps_cache', JSON.stringify(db));
+        renderWeek(); // re-render with updated data
+      }
+    } catch(e) { /* silent fail on poll */ }
+  }, 30000); // every 30 seconds
 }
 
 // ── SYNC STATE ────────────────────────────────────────────────────
@@ -422,20 +475,33 @@ function updateDvToolbarState() {
 // Save on visibility change (switching apps on mobile)
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
-    // Sync all pending immediately
-    syncAllPending();
-    // Also save active editor content
+    // Save everything immediately when leaving
     if (activeEditor && activeEditor.dataset.key) {
       localSave(activeEditor.dataset.key, activeEditor.innerHTML);
       syncKey(activeEditor.dataset.key);
     }
     if (dvDate) {
       const dvEd = document.getElementById('dv-editor');
-      if (dvEd) {
-        localSave(dayKey(dvDate), dvEd.innerHTML);
-        syncKey(dayKey(dvDate));
-      }
+      if (dvEd) { localSave(dayKey(dvDate), dvEd.innerHTML); syncKey(dayKey(dvDate)); }
     }
+    syncAllPending();
+  } else if (document.visibilityState === 'visible' && session && !isEditing) {
+    // Reload from cloud when tab becomes visible again (other device may have made changes)
+    setTimeout(async () => {
+      try {
+        const rows = await sb.getAllDays(session.token, session.userId);
+        if (!Array.isArray(rows)) return;
+        const localTs = JSON.parse(localStorage.getItem('ps_local_ts') || '{}');
+        const syncTs = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
+        let changed = false;
+        rows.forEach(r => {
+          const key = r.day_key;
+          const hasUnsaved = (localTs[key] || 0) > (syncTs[key] || 0);
+          if (!hasUnsaved && db[key] !== r.content) { db[key] = r.content; changed = true; }
+        });
+        if (changed) { localStorage.setItem('ps_cache', JSON.stringify(db)); renderWeek(); }
+      } catch(e) {}
+    }, 500);
   }
 });
 
