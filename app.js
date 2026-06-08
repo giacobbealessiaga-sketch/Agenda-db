@@ -43,31 +43,47 @@ function localSave(key, html) {
 // Sync using sendBeacon — survives page close/navigation
 // Used on blur and visibilitychange to guarantee delivery
 function syncKeyBeacon(key) {
-  if (!session || !navigator.sendBeacon) { syncKey(key); return; }
+  if (!session) return;
+  // Use keepalive fetch — survives page close on mobile and desktop
   const content = db[key] || null;
-  const url = 'https://grmfbbqujopstaagknuc.supabase.co/rest/v1/agenda';
-  const payload = content
-    ? JSON.stringify({ user_id: session.userId, day_key: key, content: content, updated_at: new Date().toISOString() })
-    : null;
-  if (payload) {
-    const blob = new Blob([payload], { type: 'application/json' });
-    // sendBeacon doesn't support custom headers — use fetch with keepalive instead
-    fetch(url, {
-      method: 'POST',
+  setSyncState('syncing');
+  if (content && !isEmptyHtml(content)) {
+    // UPSERT: delete then insert to avoid duplicate key errors
+    fetch('https://grmfbbqujopstaagknuc.supabase.co/rest/v1/agenda?user_id=eq.' + session.userId + '&day_key=eq.' + key, {
+      method: 'DELETE',
       headers: {
-        'Content-Type': 'application/json',
         'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK',
-        'Authorization': 'Bearer ' + session.token,
-        'Prefer': 'resolution=merge-duplicates'
+        'Authorization': 'Bearer ' + session.token
       },
-      body: payload,
-      keepalive: true  // survives page close
+      keepalive: true
     }).then(() => {
-      const ts = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
-      ts[key] = Date.now();
-      localStorage.setItem('ps_sync_ts', JSON.stringify(ts));
-      setSyncState('ok');
+      return fetch('https://grmfbbqujopstaagknuc.supabase.co/rest/v1/agenda', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK',
+          'Authorization': 'Bearer ' + session.token
+        },
+        body: JSON.stringify({ user_id: session.userId, day_key: key, content: content, updated_at: new Date().toISOString() }),
+        keepalive: true
+      });
+    }).then(r => {
+      if (r.ok) {
+        const ts = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
+        ts[key] = Date.now();
+        localStorage.setItem('ps_sync_ts', JSON.stringify(ts));
+        setSyncState('ok');
+      } else { setSyncState('error'); }
     }).catch(() => setSyncState('error'));
+  } else {
+    fetch('https://grmfbbqujopstaagknuc.supabase.co/rest/v1/agenda?user_id=eq.' + session.userId + '&day_key=eq.' + key, {
+      method: 'DELETE',
+      headers: {
+        'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK',
+        'Authorization': 'Bearer ' + session.token
+      },
+      keepalive: true
+    }).then(() => setSyncState('ok')).catch(() => setSyncState('error'));
   }
 }
 

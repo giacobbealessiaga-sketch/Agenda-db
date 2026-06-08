@@ -45,11 +45,16 @@ const sb = {
 
   // Upsert a single agenda day
   async upsertDay(token, userId, dayKey, content) {
+    // Delete first, then insert — avoids duplicate key constraint issues
+    await fetch(SUPABASE_URL + '/rest/v1/agenda?user_id=eq.' + userId + '&day_key=eq.' + dayKey, {
+      method: 'DELETE',
+      headers: this.authHeaders(token)
+    });
     const r = await fetch(SUPABASE_URL + '/rest/v1/agenda', {
       method: 'POST',
       headers: {
         ...this.authHeaders(token),
-        'Prefer': 'resolution=merge-duplicates'
+        'Prefer': 'return=minimal'
       },
       body: JSON.stringify({ user_id: userId, day_key: dayKey, content, updated_at: new Date().toISOString() })
     });
