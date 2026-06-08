@@ -354,23 +354,8 @@ function makeCard(d, today) {
 
   editor.addEventListener('focus', function() {
     activeEditor = this; isEditing = true;
-    card.classList.add('active');
+    // No expansion — keep layout stable to prevent iOS scroll jump
     showToolbar('main'); updateToolbarState();
-    // After keyboard opens and card expands, scroll card top into view
-    const scrollToCard = () => {
-      const nb = document.getElementById('notebook');
-      if (!nb) return;
-      const cardRect = card.getBoundingClientRect();
-      const nbRect = nb.getBoundingClientRect();
-      // If card top is above the notebook top, scroll up
-      if (cardRect.top < nbRect.top + 4) {
-        nb.scrollTop -= (nbRect.top - cardRect.top + 4);
-      }
-    };
-    // Run after card expansion and after keyboard settles
-    requestAnimationFrame(scrollToCard);
-    setTimeout(scrollToCard, 100);
-    setTimeout(scrollToCard, 300);
     if (window.visualViewport) {
       const onVvResize = () => {
         scrollToCard();
@@ -387,7 +372,6 @@ function makeCard(d, today) {
     syncKeyBeacon(key); // guaranteed sync even on page close
     setTimeout(() => {
       if (!toolbar.contains(document.activeElement) && document.activeElement !== this) {
-        card.classList.remove('active');
         if (activeEditor === this) { activeEditor = null; isEditing = false; hideToolbar('main'); }
       }
     }, 150);
@@ -671,9 +655,6 @@ document.getElementById('nav-appunti').onclick = () => {
 };
 document.getElementById('nav-oggi').onclick = () => {
   setNav('agenda'); weekOffset = 0; renderWeek();
-  const today = new Date(); today.setHours(0,0,0,0);
-  const key = dayKey(today);
-  setTimeout(() => { const ed = document.querySelector('.day-editor[data-key="' + key + '"]'); if (ed) { ed.focus(); placeCaretAtEnd(ed); } }, 120);
 };
 document.getElementById('nav-menu').onclick = () => { setNav('menu'); document.getElementById('menu-overlay').classList.add('show'); };
 document.getElementById('appunti-close').onclick = () => { document.getElementById('appunti-overlay').classList.remove('show'); setNav('agenda'); };
