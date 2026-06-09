@@ -181,8 +181,6 @@ async function startApp() {
       rows.forEach(r => { if (r.content && !isEmptyHtml(r.content)) db[r.day_key] = r.content; });
       localStorage.setItem('ps_cache', JSON.stringify(db));
     }
-    const notes = await sb.getNotes(session.token, session.userId);
-    if (notes) localStorage.setItem('ps_notes', notes);
     setSyncState('ok');
     renderWeek();
   } catch(e) {
@@ -452,11 +450,6 @@ function wireDayViewEvents() {
     renderDayView(); setTimeout(() => { const e=document.getElementById('dv-editor'); if(e)e.focus(); }, 50);
   });
   document.getElementById('dv-nav-oggi').addEventListener('click', () => openDay(new Date()));
-  document.getElementById('dv-nav-appunti').addEventListener('click', () => {
-    closeDay();
-    document.getElementById('notes-area').value = localStorage.getItem('ps_notes') || '';
-    document.getElementById('appunti-overlay').classList.add('show');
-  });
   const dvMenu = document.getElementById('dv-nav-menu');
   if (dvMenu) dvMenu.addEventListener('click', () => {
     closeDay();
@@ -647,28 +640,15 @@ nb.addEventListener('touchend', e => {
 nb.addEventListener('mousedown', e => { if (isEditing || e.target.isContentEditable || e.target.closest('[contenteditable]')) return; mX = e.clientX; mDown = true; });
 nb.addEventListener('mouseup', e => { if (!mDown || isEditing) return; mDown = false; const dx = e.clientX - mX; if (Math.abs(dx) > 45) { dx < 0 ? weekOffset++ : weekOffset--; renderWeek(); } });
 
-document.getElementById('nav-agenda').onclick = () => { setNav('agenda'); document.getElementById('appunti-overlay').classList.remove('show'); };
-document.getElementById('nav-appunti').onclick = () => {
-  setNav('appunti');
-  document.getElementById('notes-area').value = localStorage.getItem('ps_notes') || '';
-  document.getElementById('appunti-overlay').classList.add('show');
-};
+document.getElementById('nav-agenda').onclick = () => { setNav('agenda'); };
 document.getElementById('nav-oggi').onclick = () => {
   setNav('agenda'); weekOffset = 0; renderWeek();
 };
 document.getElementById('nav-menu').onclick = () => { setNav('menu'); document.getElementById('menu-overlay').classList.add('show'); };
-document.getElementById('appunti-close').onclick = () => { document.getElementById('appunti-overlay').classList.remove('show'); setNav('agenda'); };
-document.getElementById('appunti-overlay').onclick = e => { if (e.target === e.currentTarget) { e.currentTarget.classList.remove('show'); setNav('agenda'); } };
-document.getElementById('save-note-btn').onclick = function() {
-  const content = document.getElementById('notes-area').value;
-  localStorage.setItem('ps_notes', content);
-  sb.upsertNotes(session.token, session.userId, content).catch(()=>{});
-  this.textContent = 'Salvato!'; setTimeout(() => this.textContent = 'Salva appunti', 1500);
-};
 document.getElementById('menu-close').onclick = () => { document.getElementById('menu-overlay').classList.remove('show'); setNav('agenda'); };
 document.getElementById('menu-overlay').onclick = e => { if (e.target === e.currentTarget) { e.currentTarget.classList.remove('show'); setNav('agenda'); } };
 
-function setNav(w) { ['agenda','appunti','oggi','menu'].forEach(n => { const el = document.getElementById('nav-' + n); if(el) el.classList.toggle('active', n === w); }); }
+function setNav(w) { ['agenda','oggi','menu'].forEach(n => { const el = document.getElementById('nav-' + n); if(el) el.classList.toggle('active', n === w); }); }
 
 // ── LOGOUT ────────────────────────────────────────────────────────
 document.getElementById('btn-logout').onclick = async () => {
@@ -690,7 +670,7 @@ document.getElementById('btn-logout').onclick = async () => {
 
 // ── EXPORT / IMPORT ───────────────────────────────────────────────
 document.getElementById('btn-export').onclick = () => {
-  const payload = { version: 1, exported: new Date().toISOString(), agenda: db, notes: localStorage.getItem('ps_notes') || '' };
+  const payload = { version: 1, exported: new Date().toISOString(), agenda: db };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url;
@@ -708,7 +688,6 @@ document.getElementById('file-input').addEventListener('change', async function(
       if (!confirm('Importare i dati? I dati attuali verranno sostituiti.')) return;
       db = data.agenda;
       localStorage.setItem('ps_cache', JSON.stringify(db));
-      if (data.notes) localStorage.setItem('ps_notes', data.notes);
       // Mark all as needing sync
       const ts = {};
       Object.keys(db).forEach(k => { ts[k] = Date.now(); });

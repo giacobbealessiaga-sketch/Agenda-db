@@ -75,24 +75,5 @@ const sb = {
       headers: this.authHeaders(token)
     });
     return r.json();
-  },
-
-  // Upsert notes
-  async upsertNotes(token, userId, content) {
-    const r = await fetch(SUPABASE_URL + '/rest/v1/notes', {
-      method: 'POST',
-      headers: { ...this.authHeaders(token), 'Prefer': 'resolution=merge-duplicates' },
-      body: JSON.stringify({ user_id: userId, content, updated_at: new Date().toISOString() })
-    });
-    return r.ok;
-  },
-
-  // Get notes
-  async getNotes(token, userId) {
-    const r = await fetch(SUPABASE_URL + '/rest/v1/notes?user_id=eq.' + userId + '&select=content', {
-      headers: this.authHeaders(token)
-    });
-    const data = await r.json();
-    return data[0]?.content || '';
   }
 };
