@@ -494,6 +494,20 @@ function updateDvToolbarState() {
 }
 
 // Save on visibility change (switching apps on mobile)
+// Toglie qualunque focus di editing e riporta alla pagina d'atterraggio (agenda),
+// così rientrando non si resta bloccati su un giorno col focus ma senza tastiera.
+function resetToLanding() {
+  const ae = document.activeElement;
+  if (ae && (ae.isContentEditable || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
+  activeEditor = null; isEditing = false;
+  hideToolbar('main'); hideToolbar('dv');
+  const cm = document.getElementById('color-menu'); if (cm) cm.classList.remove('show');
+  const dvcm = document.getElementById('dv-color-menu'); if (dvcm) dvcm.classList.remove('show');
+  const dayView = document.getElementById('day-view');
+  if (dayView && dayView.classList.contains('open')) closeDay();
+  setNav('agenda');
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     // Save everything immediately when leaving
@@ -506,7 +520,13 @@ document.addEventListener('visibilitychange', () => {
       if (dvEd) { localSave(dayKey(dvDate), dvEd.innerHTML); syncKeyBeacon(dayKey(dvDate)); }
     }
     syncAllPending();
-  } else if (document.visibilityState === 'visible' && session && !isEditing) {
+    // Dopo aver salvato: rimuovi il focus e torna alla landing
+    resetToLanding();
+  } else if (document.visibilityState === 'visible') {
+    // Sicurezza: se per qualche motivo il focus è rimasto attivo (tipico su iOS
+    // quando si manda l'app in background), lo togliamo al rientro.
+    resetToLanding();
+    if (!session) return;
     // Reload from cloud when tab becomes visible again (other device may have made changes)
     setTimeout(async () => {
       try {
@@ -525,6 +545,20 @@ document.addEventListener('visibilitychange', () => {
     }, 500);
   }
 });
+
+// Salvataggio garantito alla chiusura/uscita dell'app (oltre al visibilitychange).
+window.addEventListener('pagehide', () => {
+  if (activeEditor && activeEditor.dataset.key) {
+    localSave(activeEditor.dataset.key, activeEditor.innerHTML);
+    syncKeyBeacon(activeEditor.dataset.key);
+  }
+  if (dvDate) {
+    const dvEd = document.getElementById('dv-editor');
+    if (dvEd) { localSave(dayKey(dvDate), dvEd.innerHTML); syncKeyBeacon(dayKey(dvDate)); }
+  }
+});
+// Al rientro (incluso ripristino da BFCache su iOS) togli sempre il focus residuo.
+window.addEventListener('pageshow', resetToLanding);
 
 // ── TOOLBAR ───────────────────────────────────────────────────────
 let activeEditor = null, savedRange = null, currentColor = '#1a1a1a';
