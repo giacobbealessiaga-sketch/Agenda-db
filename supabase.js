@@ -43,18 +43,15 @@ const sb = {
     return { ...this.headers, 'Authorization': 'Bearer ' + token };
   },
 
-  // Upsert a single agenda day
+  // Upsert atomico di un giorno: una sola richiesta, niente DELETE separata,
+  // così il dato non può restare cancellato se qualcosa va storto a metà.
+  // Richiede un vincolo UNIQUE su (user_id, day_key) lato Supabase.
   async upsertDay(token, userId, dayKey, content) {
-    // Delete first, then insert — avoids duplicate key constraint issues
-    await fetch(SUPABASE_URL + '/rest/v1/agenda?user_id=eq.' + userId + '&day_key=eq.' + dayKey, {
-      method: 'DELETE',
-      headers: this.authHeaders(token)
-    });
-    const r = await fetch(SUPABASE_URL + '/rest/v1/agenda', {
+    const r = await fetch(SUPABASE_URL + '/rest/v1/agenda?on_conflict=user_id,day_key', {
       method: 'POST',
       headers: {
         ...this.authHeaders(token),
-        'Prefer': 'return=minimal'
+        'Prefer': 'resolution=merge-duplicates,return=minimal'
       },
       body: JSON.stringify({ user_id: userId, day_key: dayKey, content, updated_at: new Date().toISOString() })
     });

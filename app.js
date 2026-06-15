@@ -25,8 +25,55 @@ function isEmptyHtml(html) {
   return text === '';
 }
 
+// Rimuove caratteri che PostgreSQL non può salvare in una colonna text
+// (NUL e caratteri di controllo) e i surrogati spaiati. Senza questo,
+// un copia-incolla da app esterne con "caratteri strani" fa fallire
+// l'INSERT su Supabase e il contenuto viene perso alla riapertura.
+function sanitizeForStorage(s) {
+  if (typeof s !== 'string' || !s) return s;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    // scarta NUL e caratteri di controllo C0/C1 (mantiene TAB=9, LF=10, CR=13)
+    if (c < 0x20 && c !== 9 && c !== 10 && c !== 13) continue;
+    if (c >= 0x7F && c <= 0x9F) continue;
+    // scarta surrogati spaiati (preserva le coppie valide)
+    if (c >= 0xD800 && c <= 0xDBFF) {
+      const n = s.charCodeAt(i + 1);
+      if (n >= 0xDC00 && n <= 0xDFFF) { out += s[i] + s[i + 1]; i++; continue; }
+      continue;
+    }
+    if (c >= 0xDC00 && c <= 0xDFFF) continue;
+    out += s[i];
+  }
+  return out;
+}
+
+// Incolla "pulito": inserisce solo testo semplice, già ripulito dai
+// caratteri problematici. Evita di portare in agenda markup e caratteri
+// strani provenienti da copia-incolla da altre app.
+function handlePaste(e) {
+  e.preventDefault();
+  const cd = e.clipboardData || window.clipboardData;
+  let text = cd ? cd.getData('text/plain') : '';
+  text = sanitizeForStorage(text);
+  if (!text) return;
+  if (document.queryCommandSupported && document.queryCommandSupported('insertText')) {
+    document.execCommand('insertText', false, text);
+  } else {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount) {
+      const r = sel.getRangeAt(0);
+      r.deleteContents();
+      r.insertNode(document.createTextNode(text));
+      r.collapse(false);
+    }
+  }
+}
+
 // Save to localStorage immediately — always called on every input
 function localSave(key, html) {
+  html = sanitizeForStorage(html);
   if (html && !isEmptyHtml(html)) {
     db[key] = html;
   } else {
@@ -44,37 +91,32 @@ function localSave(key, html) {
 // Used on blur and visibilitychange to guarantee delivery
 function syncKeyBeacon(key) {
   if (!session) return;
-  // Use keepalive fetch — survives page close on mobile and desktop
-  const content = db[key] || null;
+  // Contenuto sempre ripulito prima dell'invio: garantisce che l'INSERT
+  // su Postgres non venga mai rifiutato per caratteri non validi.
+  const content = sanitizeForStorage(db[key] || null);
   setSyncState('syncing');
+  const markSynced = () => {
+    const ts = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
+    ts[key] = Date.now();
+    localStorage.setItem('ps_sync_ts', JSON.stringify(ts));
+    setSyncState('ok');
+  };
   if (content && !isEmptyHtml(content)) {
-    // UPSERT: delete then insert to avoid duplicate key errors
-    fetch('https://grmfbbqujopstaagknuc.supabase.co/rest/v1/agenda?user_id=eq.' + session.userId + '&day_key=eq.' + key, {
-      method: 'DELETE',
+    // UPSERT ATOMICO: una sola richiesta. Niente DELETE separata, così non
+    // può capitare che il dato resti cancellato se la seconda chiamata fallisce
+    // o non parte (tipico alla chiusura dell'app o su rete instabile).
+    fetch('https://grmfbbqujopstaagknuc.supabase.co/rest/v1/agenda?on_conflict=user_id,day_key', {
+      method: 'POST',
       headers: {
+        'Content-Type': 'application/json',
         'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK',
-        'Authorization': 'Bearer ' + session.token
+        'Authorization': 'Bearer ' + session.token,
+        'Prefer': 'resolution=merge-duplicates,return=minimal'
       },
+      body: JSON.stringify({ user_id: session.userId, day_key: key, content: content, updated_at: new Date().toISOString() }),
       keepalive: true
-    }).then(() => {
-      return fetch('https://grmfbbqujopstaagknuc.supabase.co/rest/v1/agenda', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': 'sb_publishable_S5LYjuFe5m4ieS6BNZXz5A_-E7kuxuK',
-          'Authorization': 'Bearer ' + session.token
-        },
-        body: JSON.stringify({ user_id: session.userId, day_key: key, content: content, updated_at: new Date().toISOString() }),
-        keepalive: true
-      });
-    }).then(r => {
-      if (r.ok) {
-        const ts = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
-        ts[key] = Date.now();
-        localStorage.setItem('ps_sync_ts', JSON.stringify(ts));
-        setSyncState('ok');
-      } else { setSyncState('error'); }
-    }).catch(() => setSyncState('error'));
+    }).then(r => { if (r.ok) markSynced(); else setSyncState('error'); })
+      .catch(() => setSyncState('error'));
   } else {
     fetch('https://grmfbbqujopstaagknuc.supabase.co/rest/v1/agenda?user_id=eq.' + session.userId + '&day_key=eq.' + key, {
       method: 'DELETE',
@@ -83,7 +125,8 @@ function syncKeyBeacon(key) {
         'Authorization': 'Bearer ' + session.token
       },
       keepalive: true
-    }).then(() => setSyncState('ok')).catch(() => setSyncState('error'));
+    }).then(r => { if (r.ok) markSynced(); else setSyncState('error'); })
+      .catch(() => setSyncState('error'));
   }
 }
 
@@ -92,8 +135,9 @@ async function syncKey(key) {
   if (!session) return;
   setSyncState('syncing');
   try {
-    if (db[key]) {
-      const ok = await sb.upsertDay(session.token, session.userId, key, db[key]);
+    const content = sanitizeForStorage(db[key]);
+    if (content && !isEmptyHtml(content)) {
+      const ok = await sb.upsertDay(session.token, session.userId, key, content);
       if (!ok) throw new Error('upsert failed');
     } else {
       await sb.deleteDay(session.token, session.userId, key);
@@ -169,16 +213,34 @@ async function startApp() {
   wireDayViewEvents();
   renderWeek(); // show immediately with cached data
 
-  // On startup: cloud is ALWAYS source of truth — reset local timestamps
-  localStorage.removeItem('ps_local_ts');
-  localStorage.removeItem('ps_sync_ts');
-
   setSyncState('syncing');
   try {
+    // 1. Prima di tutto: spingi nel cloud le modifiche locali non ancora
+    //    sincronizzate (es. fatte offline o non salite per un errore di rete).
+    //    Così il locale non viene mai distrutto prima di essere salvato.
+    await syncAllPending();
+
+    // 2. Carica il cloud e fai il MERGE (non sovrascrivere ciecamente):
+    //    il cloud vince solo dove non c'è una modifica locale più recente.
     const rows = await sb.getAllDays(session.token, session.userId);
     if (Array.isArray(rows)) {
-      db = {};
-      rows.forEach(r => { if (r.content && !isEmptyHtml(r.content)) db[r.day_key] = r.content; });
+      const localTs = JSON.parse(localStorage.getItem('ps_local_ts') || '{}');
+      const syncTs = JSON.parse(localStorage.getItem('ps_sync_ts') || '{}');
+      const cloudKeys = new Set();
+      rows.forEach(r => {
+        const key = r.day_key;
+        cloudKeys.add(key);
+        const hasUnsavedLocal = (localTs[key] || 0) > (syncTs[key] || 0);
+        if (hasUnsavedLocal) return; // tieni la versione locale più recente
+        if (r.content && !isEmptyHtml(r.content)) db[key] = r.content;
+        else delete db[key];
+      });
+      // Giorni cancellati su un altro dispositivo: rimuovili solo se non
+      // ci sono modifiche locali in attesa di sync.
+      Object.keys(db).forEach(key => {
+        const hasUnsavedLocal = (localTs[key] || 0) > (syncTs[key] || 0);
+        if (!hasUnsavedLocal && !cloudKeys.has(key)) delete db[key];
+      });
       localStorage.setItem('ps_cache', JSON.stringify(db));
     }
     setSyncState('ok');
@@ -375,6 +437,7 @@ function makeCard(d, today) {
     }, 150);
   });
 
+  editor.addEventListener('paste', handlePaste);
   editor.addEventListener('keyup', updateToolbarState);
   editor.addEventListener('mouseup', updateToolbarState);
   body.addEventListener('touchmove', e => { if (isEditing) e.stopPropagation(); }, { passive: true });
@@ -437,6 +500,7 @@ function wireDayViewEvents() {
       }
     }, 150);
   });
+  dvEd.addEventListener('paste', handlePaste);
   dvEd.addEventListener('keyup', updateDvToolbarState);
   dvEd.addEventListener('mouseup', updateDvToolbarState);
 

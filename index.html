@@ -2,7 +2,7 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
   <title>AgendaBb</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css" />
   <style>
@@ -20,6 +20,9 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; background: #f7f3e8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; }
+    /* Blocca lo scroll/rimbalzo dell'intera pagina su iOS (PWA in home):
+       il documento resta fisso, solo le aree interne scrollano. */
+    html, body { position: fixed; inset: 0; width: 100%; overscroll-behavior: none; -webkit-overflow-scrolling: auto; }
     :root {
       --bg-primary: #ffffff; --bg-secondary: #f5f5f0; --bg-tertiary: #f7f3e8;
       --text-primary: #1a1a1a; --text-secondary: #666660; --text-tertiary: #aaa;
@@ -38,7 +41,7 @@
     }
 
     /* AUTH SCREEN */
-    .auth-screen { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100dvh; padding:24px; background:var(--bg-tertiary); }
+    .auth-screen { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; height:100dvh; padding:24px; background:var(--bg-tertiary); }
     .auth-logo { font-size:48px; margin-bottom:8px; }
     .auth-title { font-size:22px; font-weight:500; color:var(--text-primary); margin-bottom:4px; }
     .auth-sub { font-size:13px; color:var(--text-secondary); margin-bottom:32px; }
@@ -56,7 +59,7 @@
     .auth-msg { font-size:12px; color:#1e8449; margin-top:8px; text-align:center; min-height:18px; }
 
     /* APP */
-    .app { max-width:430px; margin:0 auto; background:var(--bg-tertiary); height:100dvh; display:flex; flex-direction:column; display:none; }
+    .app { max-width:430px; margin:0 auto; background:var(--bg-tertiary); height:100vh; height:100dvh; display:flex; flex-direction:column; display:none; }
     .app.visible { display:flex; }
     .header { display:flex; align-items:center; justify-content:space-between; padding:8px 10px; background:#e8f0e2; border-bottom:0.5px solid var(--border); flex-shrink:0; }
     .hdr-pill { background:var(--bg-primary); border-radius:var(--radius-md); border:0.5px solid var(--border); padding:4px 10px; font-size:13px; display:flex; align-items:center; gap:5px; cursor:pointer; user-select:none; }
@@ -80,7 +83,7 @@
     
     
     
-    .day-body { flex:1; overflow-y:auto; position:relative; cursor:text; min-height:0; }
+    .day-body { flex:1; overflow-y:auto; overscroll-behavior:contain; position:relative; cursor:text; min-height:0; }
     .day-lines { position:absolute; left:0; right:0; top:0; height:max(100%,300px); background:repeating-linear-gradient(to bottom,transparent,transparent 18px,var(--border) 18px,var(--border) 18.5px); pointer-events:none; }
     .day-editor { position:relative; z-index:1; min-height:100%; padding:3px 6px 3px 8px; font-size:13px; line-height:22px; color:var(--text-primary); font-family:inherit; word-break:break-word; outline:none; cursor:text; caret-color:var(--red); }
     .day-editor ul { margin:0; padding-left:16px; list-style:disc; }
